@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Корпоративный AI Ассистент</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+
+    <div class="sidebar">
+        <h3>📂 Документы</h3>
+        <div id="documents"></div>
+        <div id="docStatus" style="margin-top: 20px; font-size: 0.9em; color: #94a3b8;"></div>
+        
+        <div class="upload-area">
+            <input 
+                type="file" 
+                id="fileInput" 
+                accept=".pdf,.docx,.txt"
+                aria-label="Выбрать файл для загрузки"
+            />
+            <button id="uploadBtn" onclick="uploadFile()" title="Загрузить документ">Загрузить</button>
+        </div>
+    </div>
+
+    <div class="main">
+
+        <div class="chat-box" id="chatBox"></div>
+
+        <div class="input-section">
+            <div class="input-area">
+                <input 
+                    type="text" 
+                    id="question" 
+                    placeholder="✍️ Напишите ваш вопрос здесь и нажмите Enter..." 
+                    autocomplete="off"
+                    aria-label="Поле для ввода вопроса"
+                />
+                <button id="sendBtn" onclick="sendMessage()" title="Отправить (Enter)">Отправить</button>
+            </div>
+        </div>
+
+    </div>
+
+</div>
+
+<script>
+
+const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+
+async function sendMessage() {
+    const question = document.getElementById("question").value.trim();
+    
+    if (!question) {
+        showError("Введите вопрос");
+        return;
+    }
+
+    const sendBtn = document.getElementById("sendBtn");
+    const originalText = sendBtn.innerText;
+    
+    try {
+        addMessage("user", question);
+        document.getElementById("question").value = "";
+        
+        sendBtn.disabled = true;
+        sendBtn.innerText = "⏳ Получение ответа...";
+        const messageId = addMessage("bot", "Обработка...");
+
+        const formData = new FormData();
+        formData.append("question", question);
+
+        const response = await fetch("/ask", {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({detail: "Unknown error"}));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        updateMessage(messageId, data.answer);
+        
+        if (data.sources && data.sources.length > 0) {
+            addSources(messageId, data.sources);
+        }
+    } catch (error) {
+        showError(`Ошибка: ${error.message}`);
+        console.error("Error:", error);
+    } finally {
+        sendBtn.disabled = false;
+        sendBtn.innerText = originalText;
+        document.getElementById("question").focus();
+    }
+}
+
+function addMessage(type, text) {
+    const chatBox = document.getElementById("chatBox");
+    const wrapper = document.createElement("div");
+    wrapper.className = `message-wrapper ${type}-wrapper`;
+    
+    const msg = document.createElement("div");
+    msg.className = type;
+    msg.textContent = text;
+    msg.id = `msg-${Date.now()}`;
+    
+    wrapper.appendChild(msg);
+    chatBox.appendChild(wrapper);
+    chatBox.scrollTop = chatBox.scrollHeight;
+    
+    return msg.id;
+}
+
+function updateMessage(messageId, text) {
+    const msg = document.getElementById(messageId);
+    if (msg) {
+        msg.textContent = text;
+    }
+}
+
+function addSources(messageId, sources) {
+    const msg = document.getElementById(messageId);
+    if (!msg) return;
+    
+    // Check if sources div already exists
+    let sourceDiv = msg.querySelector(".source");
+    if (sourceDiv) return; // Already added
+    
+    sourceDiv = document.createElement("div");
+    sourceDiv.className = "source";
+    sourceDiv.innerHTML = "<strong>📚 Источники:</strong>";
+    
+    sources.forEach((source, idx) => {
+        const item = document.createElement("div");
+        item.className = "source-item";
+        item.textContent = `${idx + 1}. ${source.filename}`;
+        sourceDiv.appendChild(item);
+    });
+    
+    msg.appendChild(sourceDiv);
+}
+
+function showError(message) {
+    addMessage("bot", `❌ ${message}`);
+}
+
+async function uploadFile() {
+    const fileInput = document.getElementById("fileInput");
+    const uploadBtn = document.getElementById("uploadBtn");
+    
+    if (!fileInput.files.length) {
+        showError("Выберите файл");
+        return;
+    }
+
+    const file = fileInput.files[0];
+    
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+        showError(`Недопустимый формат. Поддерживаются: ${ALLOWED_EXTENSIONS.join(', ')}`);
+        return;
+    }
+    
+    if (file.size > MAX_FILE_SIZE) {
+        showError(`Файл слишком большой. Максимум: ${MAX_FILE_SIZE / 1024 / 1024}MB`);
+        return;
+    }
+
+    const originalText = uploadBtn.innerText;
+    
+    try {
+        uploadBtn.disabled = true;
+        uploadBtn.innerText = "📤 Загрузка...";
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({detail: "Unknown error"}));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        addMessage("bot", `✅ Документ загружен! Обработано ${data.count || data.chunks} блоков текста.`);
+        fileInput.value = "";
+        
+        loadDocs();
+    } catch (error) {
+        showError(`Ошибка загрузки: ${error.message}`);
+        console.error("Upload error:", error);
+    } finally {
+        uploadBtn.disabled = false;
+        uploadBtn.innerText = originalText;
+    }
+}
+
+async function loadDocs() {
+    const statusDiv = document.getElementById("docStatus");
+    
+    try {
+        const res = await fetch("/documents");
+
+        if (!res.ok) return;
+
+        const docs = await res.json();
+        const container = document.getElementById("documents");
+        container.innerHTML = "";
+
+        if (!docs || docs.length === 0) {
+            statusDiv.textContent = "Документов не загружено";
+            return;
+        }
+
+        docs.forEach(doc => {
+            const docDiv = document.createElement("div");
+            docDiv.className = "doc";
+            docDiv.title = doc.filename;
+            docDiv.innerHTML = `📄 ${escapeHtml(doc.filename)}<br><small>${doc.chunks} фрагментов</small>`;
+            container.appendChild(docDiv);
+        });
+        
+        statusDiv.textContent = `Загружено: ${docs.length} документов`;
+    } catch (error) {
+        statusDiv.textContent = "Ошибка загрузки списка";
+        console.error("Load docs error:", error);
+    }
+}
+
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+document.getElementById("question").addEventListener("keypress", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+loadDocs();
+
+</script>
+
+</body>
+</html>
