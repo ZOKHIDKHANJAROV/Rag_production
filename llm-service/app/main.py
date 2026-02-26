@@ -9,7 +9,7 @@ import json
 app = FastAPI(title="LLM Service")
 
 OLLAMA_URL = "http://ollama:11434/api/generate"
-DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama3:8b-instruct-q8_0")
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama3:8b")
 REQUEST_TIMEOUT = 120
 
 # Redis для кэша
