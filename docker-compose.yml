@@ -20,6 +20,13 @@ services:
       - "11435:11434"
     volumes:
       - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       - OLLAMA_HOST=0.0.0.0  
     restart: unless-stopped
