@@ -1,157 +1,579 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-
-<meta charset="UTF-8">
-<title>AI Knowledge Assistant</title>
-
-<link rel="stylesheet" href="/static/style.css">
-
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Knowledge Assistant</title>
+    <link rel="stylesheet" href="/static/style.css">
 </head>
-
 <body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">🧠</span>
+                    <span class="logo-text">RAG AI</span>
+                </div>
+            </div>
 
-<div class="container">
+            <!-- New Chat Button -->
+            <button class="new-chat-btn" onclick="startNewSession()">
+                <span class="icon">+</span>
+                <span>New Chat</span>
+            </button>
 
-    <div class="header">
-        <h1>AI Knowledge Assistant</h1>
-        <div class="status">RAG System</div>
+            <!-- Sessions List -->
+            <div class="sessions-section">
+                <h3>Sessions</h3>
+                <div id="sessions-list" class="sessions-list"></div>
+            </div>
+
+            <!-- Documents Panel -->
+            <div class="documents-section">
+                <h3>Documents</h3>
+                <div id="documents-list" class="documents-list"></div>
+            </div>
+
+            <!-- Service Status -->
+            <div class="status-section">
+                <h3>Services</h3>
+                <div id="services-status" class="services-status"></div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Header -->
+            <div class="header">
+                <h1 class="title">AI Knowledge Assistant</h1>
+                <div class="header-actions">
+                    <button class="btn-icon" onclick="toggleTheme()" title="Toggle theme">
+                        <span id="theme-icon">🌙</span>
+                    </button>
+                    <button class="btn-icon" onclick="refreshServices()" title="Refresh services">
+                        <span>🔄</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Chat Area -->
+            <div class="chat-area">
+                <div id="chat-container" class="chat-container">
+                    <div class="empty-state">
+                        <div class="empty-icon">💬</div>
+                        <h2>Welcome to RAG AI Assistant</h2>
+                        <p>Upload documents and ask questions about them</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sources Panel -->
+            <div id="sources-panel" class="sources-panel">
+                <div class="sources-header">
+                    <h3>Sources</h3>
+                    <button class="btn-close" onclick="closeSources()">×</button>
+                </div>
+                <div id="sources-content" class="sources-content"></div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-section">
+                <!-- File Upload -->
+                <div class="file-upload-area">
+                    <input 
+                        type="file" 
+                        id="file-input" 
+                        accept=".pdf,.txt,.doc,.docx,.md"
+                        onchange="handleFileSelect()"
+                    >
+                    <label for="file-input" class="file-label">
+                        <span class="upload-icon">📎</span>
+                        <span id="file-name">Attach file</span>
+                    </label>
+                    <div id="upload-progress" class="upload-progress hidden">
+                        <div class="progress-bar">
+                            <div id="progress-fill" class="progress-fill"></div>
+                        </div>
+                        <span id="progress-text">Uploading...</span>
+                    </div>
+                </div>
+
+                <!-- Question Input -->
+                <div class="input-wrapper">
+                    <input
+                        type="text"
+                        id="question-input"
+                        class="question-input"
+                        placeholder="Ask a question..."
+                        onkeypress="handleKeyPress(event)"
+                        autocomplete="off"
+                    >
+                    <button class="send-btn" onclick="sendQuestion()">
+                        <span>Send</span>
+                        <span class="send-icon">→</span>
+                    </button>
+                </div>
+
+                <!-- Loading Indicator -->
+                <div id="loading-indicator" class="loading-indicator hidden">
+                    <div class="spinner"></div>
+                    <span>Processing...</span>
+                </div>
+            </div>
+        </div>
     </div>
 
-    <div id="chat" class="chat"></div>
+    <!-- Toast Notification -->
+    <div id="toast" class="toast"></div>
 
-    <div class="sources" id="sources"></div>
+    <script>
+        // ==================== CONFIGURATION ====================
+        const API_BASE = '';
+        const LANGUAGE = 'ru';
 
-    <div class="input-area">
+        // ==================== STATE ====================
+        let currentSessionId = null;
+        let chatMessages = [];
+        let allSessions = [];
+        let isDarkMode = localStorage.getItem('darkMode') === 'true';
 
-        <input
-            type="text"
-            id="question"
-            placeholder="Введите вопрос..."
-        >
+        // ==================== INITIALIZATION ====================
+        window.addEventListener('DOMContentLoaded', () => {
+            initializeApp();
+            applyTheme();
+            loadSessions();
+            refreshServices();
+            setInterval(() => loadSessions(), 30000); // Refresh sessions every 30s
+            setInterval(() => refreshServices(), 60000); // Refresh services every 60s
+        });
 
-        <button onclick="sendQuestion()">Отправить</button>
+        async function initializeApp() {
+            try {
+                const response = await fetch(`${API_BASE}/api/session/new`, { method: 'POST' });
+                const data = await response.json();
+                currentSessionId = data.session_id;
+                chatMessages = [];
+                renderChat();
+                logMessage('Session started', 'info');
+                loadDocuments();
+            } catch (error) {
+                console.error('Failed to initialize session:', error);
+                showToast('Failed to start session', 'error');
+            }
+        }
 
-    </div>
+        // ==================== THEME ====================
+        function toggleTheme() {
+            isDarkMode = !isDarkMode;
+            localStorage.setItem('darkMode', isDarkMode);
+            applyTheme();
+        }
 
-    <div class="upload">
+        function applyTheme() {
+            const html = document.documentElement;
+            const icon = document.getElementById('theme-icon');
+            
+            if (isDarkMode) {
+                html.setAttribute('data-theme', 'dark');
+                icon.textContent = '☀️';
+            } else {
+                html.setAttribute('data-theme', 'light');
+                icon.textContent = '🌙';
+            }
+        }
 
-        <input type="file" id="file">
+        // ==================== SESSION MANAGEMENT ====================
+        async function startNewSession() {
+            try {
+                const response = await fetch(`${API_BASE}/api/session/new`, { method: 'POST' });
+                const data = await response.json();
+                currentSessionId = data.session_id;
+                chatMessages = [];
+                document.getElementById('question-input').value = '';
+                renderChat();
+                loadSessions();
+                showToast('New session started', 'success');
+            } catch (error) {
+                console.error('Failed to create session:', error);
+                showToast('Failed to create new session', 'error');
+            }
+        }
 
-        <button onclick="uploadFile()">
-            Загрузить документ
-        </button>
+        async function loadSessions() {
+            try {
+                const response = await fetch(`${API_BASE}/api/sessions`);
+                const data = await response.json();
+                allSessions = data.sessions || [];
+                renderSessions();
+            } catch (error) {
+                console.error('Failed to load sessions:', error);
+            }
+        }
 
-    </div>
+        function renderSessions() {
+            const container = document.getElementById('sessions-list');
+            const recentSessions = allSessions.slice(-5).reverse();
 
-</div>
+            if (recentSessions.length === 0) {
+                container.innerHTML = '<div class="empty-sessions">No sessions yet</div>';
+                return;
+            }
 
-<script>
+            container.innerHTML = recentSessions.map(session => `
+                <div class="session-item ${session.session_id === currentSessionId ? 'active' : ''}" 
+                     onclick="switchSession('${session.session_id}')">
+                    <div class="session-info">
+                        <div class="session-time">${formatTime(session.created)}</div>
+                        <div class="session-preview">${session.history.length} messages</div>
+                    </div>
+                    <button class="session-delete" onclick="deleteSession('${session.session_id}', event)">×</button>
+                </div>
+            `).join('');
+        }
 
-const session_id = "session_" + Math.random().toString(36).substring(7);
+        async function switchSession(sessionId) {
+            try {
+                const response = await fetch(`${API_BASE}/api/session/${sessionId}/history`);
+                const data = await response.json();
+                currentSessionId = sessionId;
+                chatMessages = data.history || [];
+                renderChat();
+                renderSessions();
+            } catch (error) {
+                console.error('Failed to switch session:', error);
+                showToast('Failed to switch session', 'error');
+            }
+        }
 
-const chat = document.getElementById("chat");
-const sourcesDiv = document.getElementById("sources");
+        async function deleteSession(sessionId, event) {
+            event.stopPropagation();
+            if (confirm('Delete this session?')) {
+                try {
+                    await fetch(`${API_BASE}/api/session/${sessionId}`, { method: 'DELETE' });
+                    if (currentSessionId === sessionId) {
+                        await startNewSession();
+                    }
+                    await loadSessions();
+                    showToast('Session deleted', 'success');
+                } catch (error) {
+                    console.error('Failed to delete session:', error);
+                    showToast('Failed to delete session', 'error');
+                }
+            }
+        }
 
-function addMessage(role, text){
+        // ==================== DOCUMENTS ====================
+        async function loadDocuments() {
+            try {
+                const response = await fetch(`${API_BASE}/api/documents`);
+                const data = await response.json();
+                renderDocuments(data.documents || []);
+            } catch (error) {
+                console.error('Failed to load documents:', error);
+            }
+        }
 
-    const div = document.createElement("div");
+        function renderDocuments(documents) {
+            const container = document.getElementById('documents-list');
+            
+            if (!documents || documents.length === 0) {
+                container.innerHTML = '<div class="empty-documents">No documents</div>';
+                return;
+            }
 
-    div.className = role;
+            container.innerHTML = documents.slice(0, 10).map((doc, idx) => `
+                <div class="document-item">
+                    <div class="doc-icon">📄</div>
+                    <div class="doc-info">
+                        <div class="doc-name">${doc.filename || doc.name || `Doc ${idx + 1}`}</div>
+                        <div class="doc-meta">${doc.chunks || doc.size || '?'} chunks</div>
+                    </div>
+                </div>
+            `).join('');
+        }
 
-    div.innerText = text;
+        // ==================== FILE UPLOAD ====================
+        function handleFileSelect() {
+            const input = document.getElementById('file-input');
+            const file = input.files[0];
+            
+            if (!file) return;
 
-    chat.appendChild(div);
+            const fileName = file.name;
+            document.getElementById('file-name').textContent = fileName;
 
-    chat.scrollTop = chat.scrollHeight;
-}
+            // Validate file size (max 50MB)
+            if (file.size > 50 * 1024 * 1024) {
+                showToast('File too large (max 50MB)', 'error');
+                input.value = '';
+                document.getElementById('file-name').textContent = 'Attach file';
+                return;
+            }
 
-async function sendQuestion(){
+            uploadFile(file);
+        }
 
-    const input = document.getElementById("question");
+        async function uploadFile(file) {
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('session_id', currentSessionId);
 
-    const question = input.value;
+                showProgress(true);
+                
+                const response = await fetch(`${API_BASE}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
 
-    if(!question) return;
+                if (!response.ok) {
+                    throw new Error('Upload failed');
+                }
 
-    addMessage("user", "User: " + question);
+                const data = await response.json();
+                showToast(`Document uploaded: ${file.name}`, 'success');
+                
+                // Reset file input
+                document.getElementById('file-input').value = '';
+                document.getElementById('file-name').textContent = 'Attach file';
+                
+                // Refresh documents
+                loadDocuments();
+                
+                // Add system message
+                chatMessages.push({
+                    type: 'system',
+                    content: `Document uploaded: ${file.name}`,
+                    timestamp: new Date().toISOString()
+                });
+                renderChat();
 
-    input.value = "";
+            } catch (error) {
+                console.error('Upload error:', error);
+                showToast('Failed to upload document', 'error');
+            } finally {
+                showProgress(false);
+            }
+        }
 
-    const formData = new FormData();
+        // ==================== CHAT ====================
+        async function sendQuestion() {
+            const input = document.getElementById('question-input');
+            const question = input.value.trim();
 
-    formData.append("question", question);
+            if (!question) return;
 
-    const response = await fetch("/ask",{
-        method:"POST",
-        body:formData
-    });
+            // Add user message to chat
+            chatMessages.push({
+                type: 'question',
+                content: question,
+                timestamp: new Date().toISOString()
+            });
 
-    const data = await response.json();
+            input.value = '';
+            renderChat();
 
-    addMessage("ai", "AI: " + data.answer);
+            try {
+                showLoading(true);
 
-    showSources(data.sources);
-}
+                const formData = new FormData();
+                formData.append('question', question);
+                formData.append('session_id', currentSessionId);
 
-function showSources(sources){
+                const response = await fetch(`${API_BASE}/ask`, {
+                    method: 'POST',
+                    body: formData
+                });
 
-    sourcesDiv.innerHTML = "";
+                if (!response.ok) {
+                    throw new Error('Failed to get answer');
+                }
 
-    if(!sources || sources.length === 0) return;
+                const data = await response.json();
 
-    const title = document.createElement("h3");
-    title.innerText = "Источники";
+                // Add AI response
+                chatMessages.push({
+                    type: 'answer',
+                    content: data.answer,
+                    sources: data.sources || [],
+                    timestamp: new Date().toISOString()
+                });
 
-    sourcesDiv.appendChild(title);
+                renderChat();
+                
+                if (data.sources && data.sources.length > 0) {
+                    showSources(data.sources);
+                }
 
-    sources.forEach(s=>{
+            } catch (error) {
+                console.error('Error:', error);
+                chatMessages.push({
+                    type: 'error',
+                    content: 'Sorry, I encountered an error. Please try again.',
+                    timestamp: new Date().toISOString()
+                });
+                renderChat();
+                showToast('Error processing question', 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
 
-        const item = document.createElement("div");
+        function renderChat() {
+            const container = document.getElementById('chat-container');
+            
+            if (chatMessages.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">💬</div>
+                        <h2>Welcome to RAG AI Assistant</h2>
+                        <p>Upload documents and ask questions about them</p>
+                    </div>
+                `;
+                return;
+            }
 
-        item.className = "source";
+            container.innerHTML = chatMessages.map((msg, idx) => {
+                const classes = `message message-${msg.type}`;
+                let contentHtml = '';
 
-        item.innerHTML =
-            "<b>"+s.filename+"</b><br>"+
-            "Score: "+s.score.toFixed(2)+"<br>"+
-            "<small>"+s.text+"</small>";
+                if (msg.type === 'question') {
+                    contentHtml = `<div class="message-content">${escapeHtml(msg.content)}</div>`;
+                } else if (msg.type === 'answer') {
+                    contentHtml = `
+                        <div class="message-content">
+                            ${msg.content ? escapeHtml(msg.content) : 'Processing...'}
+                            ${msg.sources && msg.sources.length > 0 ? 
+                                `<div class="sources-note">📚 ${msg.sources.length} sources</div>` : ''}
+                        </div>
+                    `;
+                } else if (msg.type === 'system') {
+                    contentHtml = `<div class="message-content system">${escapeHtml(msg.content)}</div>`;
+                } else if (msg.type === 'error') {
+                    contentHtml = `<div class="message-content error">${escapeHtml(msg.content)}</div>`;
+                }
 
-        sourcesDiv.appendChild(item);
-    });
-}
+                return `<div class="${classes}">${contentHtml}</div>`;
+            }).join('');
 
-async function uploadFile(){
+            // Scroll to bottom
+            container.scrollTop = container.scrollHeight;
+        }
 
-    const fileInput = document.getElementById("file");
+        function showSources(sources) {
+            const panel = document.getElementById('sources-panel');
+            const content = document.getElementById('sources-content');
 
-    const file = fileInput.files[0];
+            if (!sources || sources.length === 0) {
+                panel.classList.add('hidden');
+                return;
+            }
 
-    if(!file) return;
+            panel.classList.remove('hidden');
+            content.innerHTML = sources.map((source, idx) => `
+                <div class="source-item">
+                    <div class="source-header">
+                        <strong>${escapeHtml(source.filename || `Source ${idx + 1}`)}</strong>
+                        <span class="source-score">${formatScore(source.score)}</span>
+                    </div>
+                    <div class="source-text">${escapeHtml(source.text || '')}</div>
+                </div>
+            `).join('');
+        }
 
-    const formData = new FormData();
+        function closeSources() {
+            document.getElementById('sources-panel').classList.add('hidden');
+        }
 
-    formData.append("file", file);
+        // ==================== SERVICES STATUS ====================
+        async function refreshServices() {
+            try {
+                const response = await fetch(`${API_BASE}/api/services-status`);
+                const data = await response.json();
+                renderServiceStatus(data.services);
+            } catch (error) {
+                console.error('Failed to fetch services status:', error);
+            }
+        }
 
-    const resp = await fetch("/upload",{
-        method:"POST",
-        body:formData
-    });
+        function renderServiceStatus(services) {
+            const container = document.getElementById('services-status');
+            
+            container.innerHTML = Object.entries(services).map(([name, status]) => `
+                <div class="service-item">
+                    <div class="service-indicator ${status.status}"></div>
+                    <div class="service-name">${name}</div>
+                </div>
+            `).join('');
+        }
 
-    const data = await resp.json();
+        // ==================== UI HELPERS ====================
+        function handleKeyPress(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendQuestion();
+            }
+        }
 
-    alert("Документ загружен");
-}
+        function showLoading(show) {
+            const indicator = document.getElementById('loading-indicator');
+            if (show) {
+                indicator.classList.remove('hidden');
+            } else {
+                indicator.classList.add('hidden');
+            }
+        }
 
-document.getElementById("question")
-.addEventListener("keypress",function(e){
+        function showProgress(show) {
+            const progress = document.getElementById('upload-progress');
+            if (show) {
+                progress.classList.remove('hidden');
+            } else {
+                progress.classList.add('hidden');
+            }
+        }
 
-    if(e.key === "Enter"){
-        sendQuestion();
-    }
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `toast toast-${type}`;
+            toast.style.display = 'block';
 
-});
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
 
-</script>
+        // ==================== UTILITIES ====================
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
 
+        function formatTime(isoString) {
+            const date = new Date(isoString);
+            return date.toLocaleString(LANGUAGE === 'ru' ? 'ru-RU' : 'en-US', {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function formatScore(score) {
+            return `${(score * 100).toFixed(0)}%`;
+        }
+
+        function logMessage(msg, type = 'log') {
+            console.log(`[${type.toUpperCase()}] ${msg}`);
+        }
+    </script>
 </body>
 </html>
