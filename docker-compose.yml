@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
 
   qdrant:
@@ -6,12 +8,16 @@ services:
       - "6333:6333"
     volumes:
       - ./qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
     restart: unless-stopped
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
 
   ollama:
@@ -20,15 +26,8 @@ services:
       - "11435:11434"
     volumes:
       - ollama:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     environment:
-      - OLLAMA_HOST=0.0.0.0  
+      - OLLAMA_HOST=0.0.0.0
     restart: unless-stopped
 
   embedding-service:
@@ -55,10 +54,11 @@ services:
     depends_on:
       - embedding-service
       - llm-service
-    restart: unless-stopped
+      - redis
     environment:
-    - LLM_SERVICE_URL=http://llm-service:8002/generate
-    - VECTOR_SERVICE_URL=http://embedding-service:8001
+      - LLM_SERVICE_URL=http://llm-service:8002/generate
+      - VECTOR_SERVICE_URL=http://embedding-service:8001
+    restart: unless-stopped
 
   ingestion-service:
     build: ./ingestion-service
@@ -76,6 +76,21 @@ services:
       - rag-service
       - ingestion-service
     restart: unless-stopped
+    
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
 
 volumes:
   ollama:
+  redis_data:

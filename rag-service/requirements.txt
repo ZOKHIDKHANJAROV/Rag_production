@@ -1,4 +1,11 @@
 fastapi
-uvicorn
-requests
+uvicorn[standard]
+
+httpx
 numpy
+redis
+
+sentence-transformers
+torch
+
+prometheus-client

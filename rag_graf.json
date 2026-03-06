@@ -1,0 +1,58 @@
+{
+"dashboard": {
+"title": "RAG System Monitoring",
+"panels": [
+{
+"type": "timeseries",
+"title": "RAG Requests per Second",
+"targets": [
+{
+"expr": "rate(rag_requests_total[1m])",
+"legendFormat": "requests/sec"
+}
+]
+},
+{
+"type": "timeseries",
+"title": "RAG Pipeline Latency (p95)",
+"targets": [
+{
+"expr": "histogram_quantile(0.95, rate(rag_pipeline_latency_seconds_bucket[5m]))",
+"legendFormat": "p95 latency"
+}
+]
+},
+{
+"type": "timeseries",
+"title": "Vector Search Latency (p95)",
+"targets": [
+{
+"expr": "histogram_quantile(0.95, rate(vector_search_latency_seconds_bucket[5m]))",
+"legendFormat": "vector latency"
+}
+]
+},
+{
+"type": "timeseries",
+"title": "LLM Latency (p95)",
+"targets": [
+{
+"expr": "histogram_quantile(0.95, rate(llm_latency_seconds_bucket[5m]))",
+"legendFormat": "llm latency"
+}
+]
+},
+{
+"type": "stat",
+"title": "Total Requests",
+"targets": [
+{
+"expr": "rag_requests_total"
+}
+]
+}
+],
+"schemaVersion": 38,
+"version": 1
+}
+}
