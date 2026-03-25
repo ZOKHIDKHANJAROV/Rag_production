@@ -81,11 +81,26 @@ REQUEST_TIMEOUT = int(
 
 # Service URLs for health checks
 SERVICES = {
-    "rag": RAG_URL.replace("/ask", ""),
-    "embedding": f"{EMBED_URL}",
-    "ingestion": INGEST_URL.replace("/upload", ""),
-    "llm": os.getenv("LLM_SERVICE_URL", "http://llm-service:8002"),
-    "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333")
+    "rag": {
+        "url": RAG_URL.replace("/ask", ""),
+        "health_path": "/health"
+    },
+    "embedding": {
+        "url": f"{EMBED_URL}",
+        "health_path": "/health"
+    },
+    "ingestion": {
+        "url": INGEST_URL.replace("/upload", ""),
+        "health_path": "/health"
+    },
+    "llm": {
+        "url": os.getenv("LLM_SERVICE_URL", "http://llm-service:8002"),
+        "health_path": "/health"
+    },
+    "qdrant": {
+        "url": os.getenv("QDRANT_URL", "http://qdrant:6333"),
+        "health_path": "/readyz"
+    }
 }
 
 # =========================
@@ -97,7 +112,7 @@ def health():
     """Check overall system health"""
     try:
         rag_health = requests.get(
-            SERVICES["rag"] + "/health",
+            f"{SERVICES['rag']['url']}{SERVICES['rag']['health_path']}",
             timeout=5
         )
         rag_health.raise_for_status()
@@ -121,22 +136,26 @@ def services_status():
     """Get status of all backend services"""
     status = {}
     
-    for service_name, service_url in SERVICES.items():
+    for service_name, service_config in SERVICES.items():
+        service_url = service_config["url"]
+        health_url = f"{service_url}{service_config['health_path']}"
         try:
             response = requests.get(
-                f"{service_url}/health",
+                health_url,
                 timeout=3
             )
             status[service_name] = {
                 "status": "healthy" if response.status_code == 200 else "offline",
-                "url": service_url
+                "url": service_url,
+                "health_url": health_url
             }
         except Exception as e:
             logger.warning(f"Service {service_name} health check failed: {str(e)}")
             status[service_name] = {
                 "status": "offline",
                 "error": str(e),
-                "url": service_url
+                "url": service_url,
+                "health_url": health_url
             }
     
     return {"services": status, "timestamp": datetime.now().isoformat()}
@@ -358,6 +377,45 @@ def documents():
         raise HTTPException(
             status_code=500,
             detail="Failed to fetch documents"
+        )
+
+
+@app.delete("/api/documents/{document_id}")
+def delete_document(document_id: str):
+    """Soft-delete a document from vector storage."""
+    try:
+        logger.info(f"Deleting document: {document_id}")
+
+        resp = requests.post(
+            f"{EMBED_URL}/documents/{document_id}/delete",
+            timeout=REQUEST_TIMEOUT
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        return {
+            "status": result.get("status", "deleted"),
+            "document_id": document_id,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Embedding service delete error: {str(e)}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Embedding service unavailable"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Delete document failed: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete document"
         )
 
 
