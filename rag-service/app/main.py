@@ -5,6 +5,7 @@ import os
 import asyncio
 import redis.asyncio as redis
 import json
+import re
 
 from sentence_transformers import CrossEncoder
 from fastapi import FastAPI
@@ -40,6 +41,19 @@ MAX_CONTEXT_CHARS = 6000
 CACHE_COLLECTION = "semantic_cache"
 CACHE_THRESHOLD = 0.92
 
+LANG_MESSAGES = {
+    "ru": {
+        "no_info": "В базе знаний нет информации по данному вопросу.",
+        "no_context": "Контекст отсутствует.",
+        "not_grounded": "Ответ не подтверждён базой знаний."
+    },
+    "en": {
+        "no_info": "There is no information in the knowledge base for this question.",
+        "no_context": "Context is empty.",
+        "not_grounded": "The answer is not grounded in the knowledge base."
+    }
+}
+
 # ---------------------------
 # Redis session memory
 # ---------------------------
@@ -71,6 +85,22 @@ async def save_history(session_id, history):
         json.dumps(history),
         ex=3600
     )
+
+
+def detect_question_language(question: str) -> str:
+    if re.search(r"[а-яА-ЯёЁ]", question):
+        return "ru"
+    return "en"
+
+
+def language_instruction(lang: str) -> str:
+    if lang == "ru":
+        return "Отвечай строго на том же языке, на котором задан вопрос."
+    return "Answer strictly in the same language as the question."
+
+
+def localized_text(lang: str, key: str) -> str:
+    return LANG_MESSAGES.get(lang, LANG_MESSAGES["en"])[key]
 
 # ---------------------------
 # Async HTTP client
@@ -442,6 +472,8 @@ async def ask(req: AskRequest):
     })
 
     with RAG_LATENCY.time():
+        lang = detect_question_language(req.question)
+        lang_rule = language_instruction(lang)
 
         # ---------------------------
         # Semantic Cache
@@ -556,7 +588,7 @@ async def ask(req: AskRequest):
         if not filtered:
 
             return {
-                "answer": "В базе знаний нет информации по данному вопросу!.",
+                "answer": "В базе знаний нет информации по данному вопросу.",
                 "sources": []
             }
 
@@ -569,10 +601,6 @@ async def ask(req: AskRequest):
         early_context_text = "\n\n".join(early_contexts)
         early_prompt = f"""
         Ты корпоративный AI ассистент.
-        Тебе ЗАПРЕЩЕНО:
-        - использовать внешние знания
-        - дополнять информацию
-        - интерпретировать вне контекста
 
         Ты должен:
         - отвечать строго на основе предоставленного контекста
@@ -650,7 +678,7 @@ async def ask(req: AskRequest):
         if not contexts:
 
             return {
-                "answer": "Контекст отсутствует.",
+                "answer": localized_text(lang, "no_context"),
                 "sources": []
             }
 
@@ -662,10 +690,6 @@ async def ask(req: AskRequest):
 
         prompt = f"""
 Ты корпоративный AI ассистент.
-Тебе ЗАПРЕЩЕНО:
-- использовать внешние знания
-- дополнять информацию
-- интерпретировать вне контекста
 
 Ты должен:
 - отвечать строго на основе предоставленного контекста"
@@ -752,7 +776,7 @@ async def ask(req: AskRequest):
         })
 
         return {
-            "answer": "Ответ не подтверждён базой знаний.",
+            "answer": localized_text(lang, "not_grounded"),
             "sources": []
         }
     # ---------------------------

@@ -479,6 +479,45 @@ def documents():
         )
 
 
+@app.delete("/api/documents/{document_id}")
+def delete_document(document_id: str):
+    """Soft-delete a document from vector storage."""
+    try:
+        logger.info(f"Deleting document: {document_id}")
+
+        resp = requests.post(
+            f"{EMBED_URL}/documents/{document_id}/delete",
+            timeout=REQUEST_TIMEOUT
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        return {
+            "status": result.get("status", "deleted"),
+            "document_id": document_id,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            f"Embedding service delete error: {str(e)}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Embedding service unavailable"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Delete document failed: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete document"
+        )
+
+
 # =========================
 # SESSION MANAGEMENT
 # =========================
