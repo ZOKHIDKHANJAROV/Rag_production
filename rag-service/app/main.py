@@ -3,8 +3,9 @@ import numpy as np
 import logging
 import os
 import asyncio
-import redis
+import redis.asyncio as redis
 import json
+import re
 
 from sentence_transformers import CrossEncoder
 from fastapi import FastAPI
@@ -18,7 +19,14 @@ app = FastAPI(title="AI Service")
 # Models
 # ---------------------------
 
-reranker = CrossEncoder("BAAI/bge-reranker-base")
+reranker = None
+try:
+    reranker = CrossEncoder("BAAI/bge-reranker-base")
+except Exception as e:
+    logging.warning(
+        "Reranker model unavailable, fallback ranking will be used. Reason: %s",
+        str(e)
+    )
 
 # ---------------------------
 # Environment
@@ -40,6 +48,19 @@ MAX_CONTEXT_CHARS = 6000
 CACHE_COLLECTION = "semantic_cache"
 CACHE_THRESHOLD = 0.92
 
+LANG_MESSAGES = {
+    "ru": {
+        "no_info": "В базе знаний нет информации по данному вопросу.",
+        "no_context": "Контекст отсутствует.",
+        "not_grounded": "Ответ не подтверждён базой знаний."
+    },
+    "en": {
+        "no_info": "There is no information in the knowledge base for this question.",
+        "no_context": "Context is empty.",
+        "not_grounded": "The answer is not grounded in the knowledge base."
+    }
+}
+
 # ---------------------------
 # Redis session memory
 # ---------------------------
@@ -50,9 +71,13 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-def get_history(session_id):
+def _normalize_query_words(query: str):
+    return {word for word in query.lower().split() if word}
 
-    history = redis_client.get(session_id)
+
+async def get_history(session_id):
+
+    history = await redis_client.get(session_id)
 
     if not history:
         return []
@@ -60,13 +85,29 @@ def get_history(session_id):
     return json.loads(history)
 
 
-def save_history(session_id, history):
+async def save_history(session_id, history):
 
-    redis_client.set(
+    await redis_client.set(
         session_id,
         json.dumps(history),
         ex=3600
     )
+
+
+def detect_question_language(question: str) -> str:
+    if re.search(r"[а-яА-ЯёЁ]", question):
+        return "ru"
+    return "en"
+
+
+def language_instruction(lang: str) -> str:
+    if lang == "ru":
+        return "Отвечай строго на том же языке, на котором задан вопрос."
+    return "Answer strictly in the same language as the question."
+
+
+def localized_text(lang: str, key: str) -> str:
+    return LANG_MESSAGES.get(lang, LANG_MESSAGES["en"])[key]
 
 # ---------------------------
 # Async HTTP client
@@ -77,6 +118,7 @@ client = httpx.AsyncClient(timeout=60)
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
+    await redis_client.aclose()
 
 # ---------------------------
 # Logging
@@ -195,13 +237,14 @@ def cosine_similarity(a, b):
 
 def keyword_score(query, text):
 
-    words = query.lower().split()
+    words = _normalize_query_words(query)
+    lowered_text = text.lower()
 
     score = 0
 
     for w in words:
 
-        if w in text.lower():
+        if w in lowered_text:
             score += 1
 
     return score
@@ -211,6 +254,14 @@ def keyword_score(query, text):
 # ---------------------------
 
 def rerank_documents(question, docs):
+    if reranker is None:
+        for d in docs:
+            d["rerank_score"] = float(d.get("hybrid_score", d.get("score", 0)))
+        docs.sort(
+            key=lambda x: x["rerank_score"],
+            reverse=True
+        )
+        return docs
 
     pairs = [(question, d["text"]) for d in docs]
 
@@ -378,7 +429,16 @@ async def generate_search_queries(question):
 
     queries.append(question)
 
-    return queries[:4]
+    unique_queries = []
+    seen = set()
+    for query in queries:
+        normalized = query.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_queries.append(query)
+
+    return unique_queries[:4]
 
 # ---------------------------
 # Multi vector search
@@ -427,6 +487,8 @@ async def ask(req: AskRequest):
     })
 
     with RAG_LATENCY.time():
+        lang = detect_question_language(req.question)
+        lang_rule = language_instruction(lang)
 
         # ---------------------------
         # Semantic Cache
@@ -472,7 +534,7 @@ async def ask(req: AskRequest):
         # Session memory
         # ---------------------------
 
-        history = get_history(req.session_id)
+        history = await get_history(req.session_id)
 
         history = history[-10:]
 
@@ -541,7 +603,7 @@ async def ask(req: AskRequest):
         if not filtered:
 
             return {
-                "answer": "В базе знаний нет информации по данному вопросу.",
+                "answer": localized_text(lang, "no_info"),
                 "sources": []
             }
 
@@ -554,6 +616,7 @@ async def ask(req: AskRequest):
         early_context_text = "\n\n".join(early_contexts)
         early_prompt = f"""
         Ты корпоративный AI ассистент.
+        {lang_rule}
 
         Контекст:
         {early_context_text}
@@ -627,7 +690,7 @@ async def ask(req: AskRequest):
         if not contexts:
 
             return {
-                "answer": "Контекст отсутствует.",
+                "answer": localized_text(lang, "no_context"),
                 "sources": []
             }
 
@@ -639,6 +702,7 @@ async def ask(req: AskRequest):
 
         prompt = f"""
 Ты корпоративный AI ассистент.
+{lang_rule}
 
 История диалога:
 {history_text}
@@ -723,7 +787,7 @@ async def ask(req: AskRequest):
         })
 
         return {
-            "answer": "Ответ не подтверждён базой знаний.",
+            "answer": localized_text(lang, "not_grounded"),
             "sources": []
         }
     # ---------------------------
@@ -733,13 +797,10 @@ async def ask(req: AskRequest):
     history.append({"role": "user", "text": req.question})
     history.append({"role": "assistant", "text": answer})
 
-    save_history(req.session_id, history)
-
-    # ---------------------------
-    # Save semantic cache
-    # ---------------------------
-
-    await save_semantic_cache(req.question, answer)
+    await asyncio.gather(
+        save_history(req.session_id, history),
+        save_semantic_cache(req.question, answer)
+    )
 
     return {
         "answer": answer,

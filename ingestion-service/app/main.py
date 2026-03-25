@@ -10,6 +10,11 @@ app = FastAPI(title="Ingestion Service")
 VECTOR_SERVICE_URL = "http://embedding-service:8001"
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 # 🔥 PDF extraction через BytesIO
 def extract_text_from_pdf(file_bytes: bytes):
     pdf_stream = BytesIO(file_bytes)
