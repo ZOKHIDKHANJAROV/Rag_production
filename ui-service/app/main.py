@@ -141,6 +141,87 @@ def services_status():
     
     return {"services": status, "timestamp": datetime.now().isoformat()}
 
+
+@app.get("/api/debug/config")
+def debug_config():
+    """Debug endpoint - shows current configuration (LOG_LEVEL must be DEBUG)"""
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    
+    return {
+        "rag_url": RAG_URL,
+        "ingest_url": INGEST_URL,
+        "embed_url": EMBED_URL,
+        "llm_url": os.getenv("LLM_SERVICE_URL", "http://llm-service:8002"),
+        "qdrant_url": os.getenv("QDRANT_URL", "http://qdrant:6333"),
+        "request_timeout": REQUEST_TIMEOUT,
+        "log_level": log_level,
+        "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024),
+        "sessions_count": len(sessions),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.post("/api/debug/test-rag")
+def debug_test_rag(question: str = Form("What is RAG?")):
+    """Debug endpoint - test RAG connection with a simple question"""
+    logger.info(f"Testing RAG service at: {RAG_URL}")
+    
+    try:
+        payload = {
+            "question": question,
+            "session_id": "debug-test",
+            "top_k": 3
+        }
+        
+        logger.info(f"Sending test payload: {payload}")
+        
+        response = requests.post(
+            RAG_URL,
+            json=payload,
+            timeout=10
+        )
+        
+        logger.info(f"Response status: {response.status_code}")
+        
+        return {
+            "status": "success" if response.status_code == 200 else "error",
+            "status_code": response.status_code,
+            "rag_url": RAG_URL,
+            "response": response.json() if response.status_code == 200 else response.text,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except requests.exceptions.Timeout:
+        logger.error(f"RAG service timeout")
+        return {
+            "status": "error",
+            "error": "Timeout",
+            "details": f"RAG service at {RAG_URL} did not respond within 10 seconds",
+            "rag_url": RAG_URL
+        }
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Cannot connect to RAG service: {str(e)}")
+        return {
+            "status": "error",
+            "error": "Connection failed",
+            "details": f"Cannot connect to RAG service at {RAG_URL}: {str(e)}",
+            "rag_url": RAG_URL,
+            "suggestions": [
+                "1. Check if RAG service is running: docker ps",
+                "2. Check RAG service logs: docker logs rag-service",
+                "3. Check RAG_SERVICE_URL in .env file",
+                "4. Verify network connectivity between services"
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Test failed: {str(e)}")
+        return {
+            "status": "error",
+            "error": "Unknown error",
+            "details": str(e),
+            "rag_url": RAG_URL
+        }
+
 # =========================
 # ASK QUESTION
 # =========================
@@ -180,14 +261,34 @@ def ask(
             "top_k": 5
         }
 
+        logger.debug(f"Sending to RAG service: {RAG_URL} with payload: {payload}")
+
         response = requests.post(
             RAG_URL,
             json=payload,
             timeout=REQUEST_TIMEOUT
         )
 
-        response.raise_for_status()
+        logger.debug(f"RAG service response status: {response.status_code}")
+
+        if response.status_code != 200:
+            logger.error(f"RAG service error: Status {response.status_code}, Body: {response.text}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"RAG service error: {response.status_code}"
+            )
+
         result = response.json()
+        
+        logger.debug(f"RAG service result: {result}")
+
+        # Validate response structure
+        if "answer" not in result:
+            logger.error(f"Invalid response from RAG service: {result}")
+            raise HTTPException(
+                status_code=502,
+                detail="Invalid response from RAG service"
+            )
 
         # Store in session history
         sessions[session_id]["history"].append({
@@ -213,8 +314,25 @@ def ask(
             "timestamp": datetime.now().isoformat()
         })
 
+    except requests.exceptions.Timeout:
+        error_msg = f"RAG service timeout (>{REQUEST_TIMEOUT}s): {RAG_URL}"
+        logger.error(error_msg)
+        raise HTTPException(
+            status_code=504,
+            detail="RAG service timeout - try again"
+        )
+
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Cannot connect to RAG service at {RAG_URL}: {str(e)}"
+        logger.error(error_msg)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot connect to RAG service at {RAG_URL}"
+        )
+
     except requests.exceptions.RequestException as e:
-        logger.error(f"RAG service error: {str(e)}")
+        error_msg = f"RAG service error: {str(e)}"
+        logger.error(error_msg)
         raise HTTPException(
             status_code=502,
             detail="RAG service unavailable"
@@ -230,7 +348,7 @@ def ask(
         )
         raise HTTPException(
             status_code=500,
-            detail="Internal server error"
+            detail=f"Internal server error: {str(e)}"
         )
 
 # =========================

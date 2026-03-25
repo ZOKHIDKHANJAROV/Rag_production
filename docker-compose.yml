@@ -12,6 +12,7 @@ services:
       QDRANT__TELEMETRY_DISABLED: "true"
     restart: unless-stopped
 
+
   redis:
     image: redis:7
     ports:
@@ -20,15 +21,6 @@ services:
       - redis_data:/data
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11435:11434"
-    volumes:
-      - ollama:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    restart: unless-stopped
 
   embedding-service:
     build: ./embedding-service
@@ -38,14 +30,19 @@ services:
       - qdrant
     restart: unless-stopped
 
+
   llm-service:
     build: ./llm-service
     ports:
       - "8002:8002"
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434/api/generate
+      - LLM_MODEL=llama3:8b-instruct-q8_0
+      - FALLBACK_MODEL=llama3:8b
     depends_on:
-      - ollama
       - redis
     restart: unless-stopped
+
 
   rag-service:
     build: ./rag-service
@@ -60,6 +57,7 @@ services:
       - VECTOR_SERVICE_URL=http://embedding-service:8001
     restart: unless-stopped
 
+
   ingestion-service:
     build: ./ingestion-service
     ports:
@@ -67,6 +65,7 @@ services:
     depends_on:
       - embedding-service
     restart: unless-stopped
+
 
   ui-service:
     build: ./ui-service
@@ -76,7 +75,8 @@ services:
       - rag-service
       - ingestion-service
     restart: unless-stopped
-    
+
+
   prometheus:
     image: prom/prometheus
     ports:
@@ -85,12 +85,13 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     restart: unless-stopped
 
+
   grafana:
     image: grafana/grafana
     ports:
       - "3000:3000"
     restart: unless-stopped
 
+
 volumes:
-  ollama:
   redis_data:

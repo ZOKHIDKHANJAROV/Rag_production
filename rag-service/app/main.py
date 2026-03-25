@@ -556,7 +556,7 @@ async def ask(req: AskRequest):
         if not filtered:
 
             return {
-                "answer": "В базе знаний нет информации по данному вопросу.",
+                "answer": "В базе знаний нет информации по данному вопросу!.",
                 "sources": []
             }
 
@@ -569,7 +569,15 @@ async def ask(req: AskRequest):
         early_context_text = "\n\n".join(early_contexts)
         early_prompt = f"""
         Ты корпоративный AI ассистент.
+        Тебе ЗАПРЕЩЕНО:
+        - использовать внешние знания
+        - дополнять информацию
+        - интерпретировать вне контекста
 
+        Ты должен:
+        - отвечать строго на основе предоставленного контекста
+        - если информации недостаточно — написать:
+        "В базе знаний нет информации по данному вопросу!!."
         Контекст:
         {early_context_text}
 
@@ -654,7 +662,13 @@ async def ask(req: AskRequest):
 
         prompt = f"""
 Ты корпоративный AI ассистент.
+Тебе ЗАПРЕЩЕНО:
+- использовать внешние знания
+- дополнять информацию
+- интерпретировать вне контекста
 
+Ты должен:
+- отвечать строго на основе предоставленного контекста"
 История диалога:
 {history_text}
 
@@ -677,7 +691,7 @@ async def ask(req: AskRequest):
                 LLM_SERVICE_URL,
                 json={
                     "prompt": prompt,
-                    "model": REASON_MODEL,
+                    "model": FINAL_MODEL,
                     "temperature": 0,
                     "max_tokens": 1024
                 }
@@ -699,7 +713,7 @@ async def ask(req: AskRequest):
             LLM_SERVICE_URL,
             json={
                 "prompt": prompt,
-                "model": REASON_MODEL,
+                "model": FINAL_MODEL,
                 "temperature": 0,
                 "max_tokens": 1024
             }
