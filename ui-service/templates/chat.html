@@ -68,15 +68,6 @@
                 </div>
             </div>
 
-            <!-- Sources Panel -->
-            <div id="sources-panel" class="sources-panel">
-                <div class="sources-header">
-                    <h3>Sources</h3>
-                    <button class="btn-close" onclick="closeSources()">×</button>
-                </div>
-                <div id="sources-content" class="sources-content"></div>
-            </div>
-
             <!-- Input Area -->
             <div class="input-section">
                 <!-- File Upload -->
@@ -136,6 +127,7 @@
         let currentSessionId = null;
         let chatMessages = [];
         let allSessions = [];
+        let documentsCache = [];
         let isDarkMode = localStorage.getItem('darkMode') === 'true';
 
         // ==================== INITIALIZATION ====================
@@ -268,7 +260,8 @@
             try {
                 const response = await fetch(`${API_BASE}/api/documents`);
                 const data = await response.json();
-                renderDocuments(data.documents || []);
+                documentsCache = data.documents || [];
+                renderDocuments(documentsCache);
             } catch (error) {
                 console.error('Failed to load documents:', error);
             }
@@ -289,8 +282,34 @@
                         <div class="doc-name">${doc.filename || doc.name || `Doc ${idx + 1}`}</div>
                         <div class="doc-meta">${doc.chunks || doc.size || '?'} chunks</div>
                     </div>
+                    ${doc.document_id ? `
+                        <button class="document-delete" onclick="deleteDocument('${doc.document_id}')">🗑️</button>
+                    ` : ''}
                 </div>
             `).join('');
+        }
+
+        async function deleteDocument(documentId) {
+            const documentData = documentsCache.find(doc => doc.document_id === documentId) || {};
+            const fileName = documentData.filename || documentData.name || documentId;
+            const confirmed = confirm(`Delete document "${fileName}"?`);
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/documents/${documentId}`, {
+                    method: 'DELETE'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Delete failed');
+                }
+
+                showToast(`Document deleted: ${fileName}`, 'success');
+                await loadDocuments();
+            } catch (error) {
+                console.error('Failed to delete document:', error);
+                showToast('Failed to delete document', 'error');
+            }
         }
 
         // ==================== FILE UPLOAD ====================
@@ -386,11 +405,31 @@
                     body: formData
                 });
 
-                if (!response.ok) {
-                    throw new Error('Failed to get answer');
+                logMessage(`Response status: ${response.status}`, 'debug');
+
+                // Handle different HTTP status codes
+                if (response.status === 502) {
+                    throw new Error('RAG service is unavailable - backend services not running');
+                } else if (response.status === 503) {
+                    throw new Error('Cannot connect to RAG service - check service URLs in .env');
+                } else if (response.status === 504) {
+                    throw new Error('RAG service timeout - the request took too long');
+                } else if (response.status === 500) {
+                    const errorData = await response.json();
+                    throw new Error(`Server error: ${errorData.detail || 'Unknown'}`);
+                } else if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(`Request failed: ${errorData.detail || response.statusText}`);
                 }
 
                 const data = await response.json();
+                
+                logMessage(`Got response: ${JSON.stringify(data).substring(0, 200)}`, 'debug');
+
+                // Validate response
+                if (!data.answer) {
+                    throw new Error('Invalid response - no answer field');
+                }
 
                 // Add AI response
                 chatMessages.push({
@@ -401,20 +440,18 @@
                 });
 
                 renderChat();
-                
-                if (data.sources && data.sources.length > 0) {
-                    showSources(data.sources);
-                }
 
             } catch (error) {
                 console.error('Error:', error);
+                logMessage(`Error: ${error.message}`, 'error');
+                
                 chatMessages.push({
                     type: 'error',
-                    content: 'Sorry, I encountered an error. Please try again.',
+                    content: `❌ Error: ${error.message}`,
                     timestamp: new Date().toISOString()
                 });
                 renderChat();
-                showToast('Error processing question', 'error');
+                showToast(error.message, 'error');
             } finally {
                 showLoading(false);
             }
@@ -444,8 +481,6 @@
                     contentHtml = `
                         <div class="message-content">
                             ${msg.content ? escapeHtml(msg.content) : 'Processing...'}
-                            ${msg.sources && msg.sources.length > 0 ? 
-                                `<div class="sources-note">📚 ${msg.sources.length} sources</div>` : ''}
                         </div>
                     `;
                 } else if (msg.type === 'system') {
@@ -459,31 +494,6 @@
 
             // Scroll to bottom
             container.scrollTop = container.scrollHeight;
-        }
-
-        function showSources(sources) {
-            const panel = document.getElementById('sources-panel');
-            const content = document.getElementById('sources-content');
-
-            if (!sources || sources.length === 0) {
-                panel.classList.add('hidden');
-                return;
-            }
-
-            panel.classList.remove('hidden');
-            content.innerHTML = sources.map((source, idx) => `
-                <div class="source-item">
-                    <div class="source-header">
-                        <strong>${escapeHtml(source.filename || `Source ${idx + 1}`)}</strong>
-                        <span class="source-score">${formatScore(source.score)}</span>
-                    </div>
-                    <div class="source-text">${escapeHtml(source.text || '')}</div>
-                </div>
-            `).join('');
-        }
-
-        function closeSources() {
-            document.getElementById('sources-panel').classList.add('hidden');
         }
 
         // ==================== SERVICES STATUS ====================
@@ -545,7 +555,10 @@
             }, 3000);
         }
 
-        // ==================== UTILITIES ====================
+        function logMessage(msg, type = 'log') {
+            console.log(`[${type.toUpperCase()}] ${msg}`);
+        }
+
         function escapeHtml(text) {
             const map = {
                 '&': '&amp;',
@@ -555,24 +568,6 @@
                 "'": '&#039;'
             };
             return text.replace(/[&<>"']/g, m => map[m]);
-        }
-
-        function formatTime(isoString) {
-            const date = new Date(isoString);
-            return date.toLocaleString(LANGUAGE === 'ru' ? 'ru-RU' : 'en-US', {
-                month: 'short',
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-        }
-
-        function formatScore(score) {
-            return `${(score * 100).toFixed(0)}%`;
-        }
-
-        function logMessage(msg, type = 'log') {
-            console.log(`[${type.toUpperCase()}] ${msg}`);
         }
     </script>
 </body>
