@@ -289,8 +289,32 @@
                         <div class="doc-name">${doc.filename || doc.name || `Doc ${idx + 1}`}</div>
                         <div class="doc-meta">${doc.chunks || doc.size || '?'} chunks</div>
                     </div>
+                    ${doc.document_id ? `
+                        <button class="document-delete" onclick="deleteDocument('${doc.document_id}', '${escapeHtml(doc.filename || `Doc ${idx + 1}`)}')">🗑️</button>
+                    ` : ''}
                 </div>
             `).join('');
+        }
+
+        async function deleteDocument(documentId, fileName) {
+            const confirmed = confirm(`Delete document "${fileName}"?`);
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/documents/${documentId}`, {
+                    method: 'DELETE'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Delete failed');
+                }
+
+                showToast(`Document deleted: ${fileName}`, 'success');
+                await loadDocuments();
+            } catch (error) {
+                console.error('Failed to delete document:', error);
+                showToast('Failed to delete document', 'error');
+            }
         }
 
         // ==================== FILE UPLOAD ====================
