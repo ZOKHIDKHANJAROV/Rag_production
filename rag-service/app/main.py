@@ -3,7 +3,7 @@ import numpy as np
 import logging
 import os
 import asyncio
-import redis
+import redis.asyncio as redis
 import json
 
 from sentence_transformers import CrossEncoder
@@ -50,9 +50,13 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-def get_history(session_id):
+def _normalize_query_words(query: str):
+    return {word for word in query.lower().split() if word}
 
-    history = redis_client.get(session_id)
+
+async def get_history(session_id):
+
+    history = await redis_client.get(session_id)
 
     if not history:
         return []
@@ -60,9 +64,9 @@ def get_history(session_id):
     return json.loads(history)
 
 
-def save_history(session_id, history):
+async def save_history(session_id, history):
 
-    redis_client.set(
+    await redis_client.set(
         session_id,
         json.dumps(history),
         ex=3600
@@ -77,6 +81,7 @@ client = httpx.AsyncClient(timeout=60)
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
+    await redis_client.aclose()
 
 # ---------------------------
 # Logging
@@ -195,13 +200,14 @@ def cosine_similarity(a, b):
 
 def keyword_score(query, text):
 
-    words = query.lower().split()
+    words = _normalize_query_words(query)
+    lowered_text = text.lower()
 
     score = 0
 
     for w in words:
 
-        if w in text.lower():
+        if w in lowered_text:
             score += 1
 
     return score
@@ -378,7 +384,16 @@ async def generate_search_queries(question):
 
     queries.append(question)
 
-    return queries[:4]
+    unique_queries = []
+    seen = set()
+    for query in queries:
+        normalized = query.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_queries.append(query)
+
+    return unique_queries[:4]
 
 # ---------------------------
 # Multi vector search
@@ -472,7 +487,7 @@ async def ask(req: AskRequest):
         # Session memory
         # ---------------------------
 
-        history = get_history(req.session_id)
+        history = await get_history(req.session_id)
 
         history = history[-10:]
 
@@ -733,13 +748,10 @@ async def ask(req: AskRequest):
     history.append({"role": "user", "text": req.question})
     history.append({"role": "assistant", "text": answer})
 
-    save_history(req.session_id, history)
-
-    # ---------------------------
-    # Save semantic cache
-    # ---------------------------
-
-    await save_semantic_cache(req.question, answer)
+    await asyncio.gather(
+        save_history(req.session_id, history),
+        save_semantic_cache(req.question, answer)
+    )
 
     return {
         "answer": answer,
