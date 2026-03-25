@@ -136,6 +136,7 @@
         let currentSessionId = null;
         let chatMessages = [];
         let allSessions = [];
+        let documentsCache = [];
         let isDarkMode = localStorage.getItem('darkMode') === 'true';
 
         // ==================== INITIALIZATION ====================
@@ -268,7 +269,8 @@
             try {
                 const response = await fetch(`${API_BASE}/api/documents`);
                 const data = await response.json();
-                renderDocuments(data.documents || []);
+                documentsCache = data.documents || [];
+                renderDocuments(documentsCache);
             } catch (error) {
                 console.error('Failed to load documents:', error);
             }
@@ -290,13 +292,15 @@
                         <div class="doc-meta">${doc.chunks || doc.size || '?'} chunks</div>
                     </div>
                     ${doc.document_id ? `
-                        <button class="document-delete" onclick="deleteDocument('${doc.document_id}', '${escapeHtml(doc.filename || `Doc ${idx + 1}`)}')">🗑️</button>
+                        <button class="document-delete" onclick="deleteDocument('${doc.document_id}')">🗑️</button>
                     ` : ''}
                 </div>
             `).join('');
         }
 
-        async function deleteDocument(documentId, fileName) {
+        async function deleteDocument(documentId) {
+            const documentData = documentsCache.find(doc => doc.document_id === documentId) || {};
+            const fileName = documentData.filename || documentData.name || documentId;
             const confirmed = confirm(`Delete document "${fileName}"?`);
             if (!confirmed) return;
 
