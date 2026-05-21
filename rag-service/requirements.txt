@@ -5,7 +5,4 @@ httpx
 numpy
 redis
 
-sentence-transformers
-torch
-
 prometheus-client

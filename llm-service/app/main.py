@@ -8,19 +8,20 @@ import os
 
 app = FastAPI(title="LLM Service")
 
-OLLAMA_URL = "http://ollama:11434/api/generate"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434/api/generate")
 
-PRIMARY_MODEL = os.getenv("LLM_MODEL", "llama3:8b-instruct-q8_0")
+PRIMARY_MODEL = os.getenv("LLM_MODEL", "mistral:latest")
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "llama3:8b")
 
-REQUEST_TIMEOUT = 300
-RETRY_COUNT = 3
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+RETRY_COUNT = int(os.getenv("RETRY_COUNT", "3"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
 
 # ---------- Redis (async) ----------
 redis_client = redis.Redis(
-    host="redis",
-    port=6379,
+    host=os.getenv("REDIS_HOST", "redis"),
+    port=int(os.getenv("REDIS_PORT", "6379")),
     decode_responses=True
 )
 
@@ -86,10 +87,10 @@ async def retry_request(payload):
 
 
 # ---------- Fallback ----------
-async def generate_with_fallback(payload):
+async def generate_with_fallback(payload, model):
 
     try:
-        payload["model"] = PRIMARY_MODEL
+        payload["model"] = model
         return await retry_request(payload)
 
     except Exception:
@@ -118,7 +119,9 @@ async def generate(req: LLMRequest):
 
     payload = {
         "prompt": req.prompt,
+        "model": model,
         "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": {
             "temperature": req.temperature,
             "num_predict": req.max_tokens
@@ -127,7 +130,7 @@ async def generate(req: LLMRequest):
 
     try:
 
-        response = await generate_with_fallback(payload)
+        response = await generate_with_fallback(payload, model)
 
     except Exception as e:
 

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   qdrant:
@@ -20,61 +18,100 @@ services:
       - redis_data:/data
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11435:11434"
-    volumes:
-      - ollama:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    restart: unless-stopped
-
   embedding-service:
     build: ./embedding-service
+    env_file:
+      - .env
     ports:
       - "8001:8001"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
     depends_on:
       - qdrant
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
     restart: unless-stopped
 
   llm-service:
     build: ./llm-service
+    env_file:
+      - .env
     ports:
       - "8002:8002"
     depends_on:
-      - ollama
       - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
 
   rag-service:
     build: ./rag-service
+    env_file:
+      - .env
     ports:
       - "8003:8003"
     depends_on:
-      - embedding-service
-      - llm-service
-      - redis
+      embedding-service:
+        condition: service_healthy
+      llm-service:
+        condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       - LLM_SERVICE_URL=http://llm-service:8002/generate
       - VECTOR_SERVICE_URL=http://embedding-service:8001
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
 
   ingestion-service:
     build: ./ingestion-service
+    env_file:
+      - .env
     ports:
       - "8004:8004"
     depends_on:
-      - embedding-service
+      embedding-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
 
   ui-service:
     build: ./ui-service
+    env_file:
+      - .env
     ports:
       - "8000:8000"
+    volumes:
+      - ui_data:/app/data
     depends_on:
-      - rag-service
-      - ingestion-service
+      rag-service:
+        condition: service_healthy
+      ingestion-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
     
   prometheus:
@@ -92,5 +129,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  ollama:
   redis_data:
+  hf_cache:
+  ui_data:

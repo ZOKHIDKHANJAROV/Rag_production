@@ -5,20 +5,16 @@ import os
 import asyncio
 import redis
 import json
+import hashlib
+import re
 
-from sentence_transformers import CrossEncoder
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, generate_latest
 
 app = FastAPI(title="AI Service")
-
-# ---------------------------
-# Models
-# ---------------------------
-
-reranker = CrossEncoder("BAAI/bge-reranker-base")
 
 # ---------------------------
 # Environment
@@ -27,28 +23,53 @@ reranker = CrossEncoder("BAAI/bge-reranker-base")
 LLM_SERVICE_URL = os.getenv("LLM_SERVICE_URL", "http://llm-service:8002/generate")
 VECTOR_SERVICE_URL = os.getenv("VECTOR_SERVICE_URL", "http://embedding-service:8001")
 
-#LLM_MODEL = os.getenv("LLM_MODEL", "llama3:8b-instruct-q8_0")
-FAST_MODEL = os.getenv("FAST_MODEL", "qwen3.5:0.8b")
-MID_MODEL = os.getenv("MID_MODEL", "qwen3.5:4b")
-REASON_MODEL = os.getenv("REASON_MODEL", "qwen3.5:9b")
-FINAL_MODEL = os.getenv("FINAL_MODEL", "llama3:8b-instruct-q8_0")
+LLM_MODEL = os.getenv("LLM_MODEL", "mistral:latest")
+FAST_MODEL = os.getenv("FAST_MODEL", LLM_MODEL)
+MID_MODEL = os.getenv("MID_MODEL", LLM_MODEL)
+REASON_MODEL = os.getenv("REASON_MODEL", "llama3:8b-instruct-q8_0")
+FINAL_MODEL = os.getenv("FINAL_MODEL", LLM_MODEL)
 
-SCORE_THRESHOLD = 0.30
-SEMANTIC_THRESHOLD = 0.30
-MAX_CONTEXT_CHARS = 6000
+SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.25"))
+SEMANTIC_THRESHOLD = float(os.getenv("RAG_SEMANTIC_THRESHOLD", "0.30"))
+MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "5500"))
+MAX_HISTORY_MESSAGES = int(os.getenv("RAG_MAX_HISTORY_MESSAGES", "6"))
+RAG_ENABLE_COMPRESSION = os.getenv("RAG_ENABLE_COMPRESSION", "false").lower() == "true"
+RAG_ENABLE_QUERY_EXPANSION = os.getenv("RAG_ENABLE_QUERY_EXPANSION", "false").lower() == "true"
+RAG_ENABLE_GROUNDING_CHECK = os.getenv("RAG_ENABLE_GROUNDING_CHECK", "false").lower() == "true"
+RAG_SEARCH_CANDIDATES = int(os.getenv("RAG_SEARCH_CANDIDATES", "24"))
+RAG_FINAL_TOP_K = int(os.getenv("RAG_FINAL_TOP_K", "5"))
 
 CACHE_COLLECTION = "semantic_cache"
 CACHE_THRESHOLD = 0.92
+RAG_CACHE_TTL = int(os.getenv("RAG_CACHE_TTL", "600"))
+RAG_CACHE_VERSION = "lang-v2"
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+LLM_UNAVAILABLE_MESSAGE = (
+    "LLM service is unavailable or the requested Ollama model is not installed. "
+    "Relevant sources were found, but generation cannot be completed yet."
+)
 
 # ---------------------------
 # Redis session memory
 # ---------------------------
 
 redis_client = redis.Redis(
-    host="redis",
-    port=6379,
+    host=os.getenv("REDIS_HOST", "redis"),
+    port=int(os.getenv("REDIS_PORT", "6379")),
     decode_responses=True
 )
+
+def build_rag_cache_key(question):
+    raw = question.strip().lower()
+    return f"rag:{RAG_CACHE_VERSION}:" + hashlib.sha256(raw.encode()).hexdigest()
+
+def response_language_instruction(question):
+    cyrillic_count = sum(1 for ch in question.lower() if "\u0430" <= ch <= "\u044f" or ch == "\u0451")
+
+    if cyrillic_count >= 2:
+        return "Answer strictly in Russian. Do not switch to English."
+
+    return "Answer strictly in the same language as the user's question."
 
 def get_history(session_id):
 
@@ -72,7 +93,7 @@ def save_history(session_id, history):
 # Async HTTP client
 # ---------------------------
 
-client = httpx.AsyncClient(timeout=60)
+client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -133,49 +154,21 @@ def metrics():
 # ---------------------------
 
 async def check_semantic_cache(question):
+    cached = redis_client.get(build_rag_cache_key(question))
 
-    resp = await client.post(
-        f"{VECTOR_SERVICE_URL}/search",
-        json={
-            "query": question,
-            "top_k": 1,
-            "collection": CACHE_COLLECTION
-        }
-    )
+    if cached:
+        logging.info({"event": "rag_cache_hit"})
+        return cached
 
-    results = resp.json().get("results", [])
-
-    if not results:
-
-        logging.info({"event": "semantic_cache_miss"})
-        return None
-
-    best = results[0]
-
-    if best["score"] > CACHE_THRESHOLD:
-
-        logging.info({
-            "event": "semantic_cache_hit",
-            "score": best["score"]
-        })
-
-        payload = best.get("payload", {})
-        return payload.get("text")
-
-    logging.info({"event": "semantic_cache_miss"})
-
+    logging.info({"event": "rag_cache_miss"})
     return None
 
 
 async def save_semantic_cache(question, answer):
-
-    await client.post(
-        f"{VECTOR_SERVICE_URL}/index",
-        json={
-            "texts": [question],
-            "payload": {"text": answer},
-            "collection": CACHE_COLLECTION
-        }
+    redis_client.setex(
+        build_rag_cache_key(question),
+        RAG_CACHE_TTL,
+        answer
     )
 
 # ---------------------------
@@ -195,33 +188,28 @@ def cosine_similarity(a, b):
 
 def keyword_score(query, text):
 
-    words = query.lower().split()
+    words = {
+        word
+        for word in re.findall(r"[\w\u0400-\u04ff]{3,}", query.lower())
+        if len(word) >= 3
+    }
 
-    score = 0
+    if not words:
+        return 0
 
-    for w in words:
+    text_words = set(re.findall(r"[\w\u0400-\u04ff]{3,}", text.lower()))
+    if not text_words:
+        return 0
 
-        if w in text.lower():
-            score += 1
-
-    return score
+    return len(words & text_words) / len(words)
 
 # ---------------------------
 # Reranker
 # ---------------------------
 
 def rerank_documents(question, docs):
-
-    pairs = [(question, d["text"]) for d in docs]
-
-    scores = reranker.predict(pairs)
-
-    for i, score in enumerate(scores):
-
-        docs[i]["rerank_score"] = float(score)
-
     docs.sort(
-        key=lambda x: x["rerank_score"],
+        key=lambda x: x.get("hybrid_score", x.get("score", 0)),
         reverse=True
     )
 
@@ -275,10 +263,12 @@ async def parallel_embeddings(answer, contexts):
 async def compress_documents(docs, question):
 
     joined_docs = "\n\n".join(docs)
+    language_instruction = response_language_instruction(question)
 
     prompt = f"""
 Оставь только информацию из документов,
 которая может помочь ответить на вопрос.
+{language_instruction}
 
 Вопрос:
 {question}
@@ -298,7 +288,15 @@ async def compress_documents(docs, question):
         }
     )
 
-    text = resp.json()["response"]
+    data = resp.json()
+    text = data.get("response")
+
+    if not text:
+        logging.warning({
+            "event": "compression_skipped",
+            "error": data.get("error", "empty_response")
+        })
+        return docs
 
     return [text]
 
@@ -308,77 +306,28 @@ async def compress_documents(docs, question):
 # ---------------------------
 
 async def route_question(question):
-
-    prompt = f"""
-Определи параметры поиска документов.
-
-Вопрос:
-{question}
-
-Ответь JSON:
-
-{{
-"top_k": число от 2 до 10,
-"compression": true или false
-}}
-"""
-
-    resp = await client.post(
-        LLM_SERVICE_URL,
-        json={
-            "prompt": prompt,
-            "model": FAST_MODEL,
-            "temperature": 0
-        }
-    )
-
-    text = resp.json().get("response", "")
-
-    try:
-        return json.loads(text)
-    except:
-        return {
-            "top_k": 5,
-            "compression": True
-        }
+    word_count = len(re.findall(r"[\w\u0400-\u04ff]+", question))
+    top_k = 6 if word_count <= 8 else 10
+    return {
+        "top_k": top_k,
+        "compression": RAG_ENABLE_COMPRESSION
+    }
 
 # ---------------------------
 # Multi query generation
 # ---------------------------
 
 async def generate_search_queries(question):
+    query = re.sub(r"\s+", " ", question).strip()
+    queries = [query]
 
-    prompt = f"""
-Сгенерируй 3 различных поисковых запроса
-для поиска информации в корпоративных документах.
+    if RAG_ENABLE_QUERY_EXPANSION:
+        keywords = re.findall(r"[\w\u0400-\u04ff]{4,}", query.lower())
+        keyword_query = " ".join(dict.fromkeys(keywords[:12]))
+        if keyword_query and keyword_query != query.lower():
+            queries.append(keyword_query)
 
-Вопрос:
-{question}
-
-Верни только список.
-"""
-
-    resp = await client.post(
-        LLM_SERVICE_URL,
-        json={
-            "prompt": prompt,
-            "model": FAST_MODEL,
-            "temperature": 0.2,
-            "max_tokens": 200
-        }
-    )
-
-    text = resp.json().get("response", "")
-
-    queries = [
-        q.strip("- ").strip()
-        for q in text.split("\n")
-        if q.strip()
-    ]
-
-    queries.append(question)
-
-    return queries[:4]
+    return queries[:2]
 
 # ---------------------------
 # Multi vector search
@@ -400,7 +349,14 @@ async def multi_vector_search(queries, top_k):
             )
         )
 
-    responses = await asyncio.gather(*tasks)
+    try:
+        responses = await asyncio.gather(*tasks)
+    except httpx.HTTPError as exc:
+        logging.warning({"event": "vector_search_unavailable", "error": str(exc)})
+        raise HTTPException(
+            status_code=503,
+            detail="Vector service is not ready"
+        ) from exc
 
     results = []
 
@@ -459,8 +415,8 @@ async def ask(req: AskRequest):
             "queries": queries
         })
 
-        top_k = router.get("top_k", req.top_k)
-        use_compression = router.get("compression", True)
+        top_k = max(1, min(int(router.get("top_k", req.top_k)), 10))
+        use_compression = bool(router.get("compression", RAG_ENABLE_COMPRESSION))
 
         logging.info({
             "event": "router_decision",
@@ -474,7 +430,7 @@ async def ask(req: AskRequest):
 
         history = get_history(req.session_id)
 
-        history = history[-10:]
+        history = history[-MAX_HISTORY_MESSAGES:]
 
         history_text = "\n".join(
             [f"{h['role']}: {h['text']}" for h in history]
@@ -488,9 +444,9 @@ async def ask(req: AskRequest):
 
             search_results = await multi_vector_search(
                 queries,
-                top_k
+                max(top_k, RAG_SEARCH_CANDIDATES)
             )
-            search_results = search_results[:50]
+            search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
 
         # ---------------------------
         # Deduplicate
@@ -501,11 +457,12 @@ async def ask(req: AskRequest):
 
         for r in search_results:
 
-            doc_id = r.get("document_id") or r.get("id") or r["text"][:50]
+            doc_id = r.get("document_id") or r.get("id") or ""
+            chunk_key = (doc_id, r["text"][:200])
 
-            if doc_id not in seen:
+            if chunk_key not in seen:
 
-                seen.add(doc_id)
+                seen.add(chunk_key)
                 unique.append(r)
 
         search_results = unique
@@ -533,10 +490,10 @@ async def ask(req: AskRequest):
 
         filtered = [
             r for r in search_results
-            if r["score"] >= SCORE_THRESHOLD
+            if r["score"] >= SCORE_THRESHOLD or r["hybrid_score"] >= SCORE_THRESHOLD
         ]
 
-        filtered = filtered[:20]
+        filtered = filtered[:RAG_SEARCH_CANDIDATES]
 
         if not filtered:
 
@@ -546,64 +503,15 @@ async def ask(req: AskRequest):
             }
 
         # ---------------------------
-        # Early Answer task
-        # ---------------------------           
-        early_contexts = [
-            r["text"] for r in filtered[:3]
-        ]
-        early_context_text = "\n\n".join(early_contexts)
-        early_prompt = f"""
-        Ты корпоративный AI ассистент.
-
-        Контекст:
-        {early_context_text}
-
-        Вопрос:
-        {req.question}
-
-        Ответ:
-        """
-
-        early_llm_task = client.post(
-            LLM_SERVICE_URL,
-            json={
-                "prompt": early_prompt,
-                "model": FAST_MODEL,
-                "temperature": 0,
-                "max_tokens": 300
-            }
-        )
-
-        # ---------------------------
         # Reranker
         # ---------------------------
 
-        rerank_task = asyncio.to_thread(
+        reranked = await asyncio.to_thread(
             rerank_documents,
             req.question,
             filtered
         )
-        early_resp, reranked = await asyncio.gather(
-            early_llm_task,
-            rerank_task
-        )
-
-        early_resp.raise_for_status()
-
-        early_answer = early_resp.json().get("response", "")
-
-        if len(early_answer.split()) > 10:
-
-            logging.info({
-                "event": "early_answer_used"
-            })
-
-            return {
-                "answer": early_answer,
-                "sources": search_results[:3],
-                "early": True
-            }
-        reranked = reranked[:5]
+        reranked = reranked[:RAG_FINAL_TOP_K]
 
         contexts = [r["text"] for r in reranked]
 
@@ -637,8 +545,14 @@ async def ask(req: AskRequest):
         # Prompt
         # ---------------------------
 
+        language_instruction = response_language_instruction(req.question)
         prompt = f"""
 Ты корпоративный AI ассистент.
+{language_instruction}
+Используй только контекст ниже и историю диалога, если она помогает понять вопрос.
+Если в контексте нет ответа, прямо скажи, что в базе знаний нет такой информации.
+Не выдумывай факты, номера, даты и имена.
+Отвечай кратко, но полно.
 
 История диалога:
 {history_text}
@@ -670,7 +584,11 @@ async def ask(req: AskRequest):
 
         llm_response.raise_for_status()
 
-    answer = llm_response.json().get("response", "")
+    answer_data = llm_response.json()
+    answer = answer_data.get("response", "")
+
+    if answer_data.get("error"):
+        logging.warning({"event": "final_llm_error", "error": answer_data.get("error")})
 
     # ---------------------------
     # Fallback model
@@ -690,42 +608,55 @@ async def ask(req: AskRequest):
             }
         )
 
-        answer = fallback_resp.json().get("response", "")
+        fallback_data = fallback_resp.json()
+        answer = fallback_data.get("response", "")
+
+        if fallback_data.get("error"):
+            logging.warning({"event": "fallback_llm_error", "error": fallback_data.get("error")})
+
+    if not answer.strip():
+        logging.warning({"event": "llm_answer_unavailable"})
+        return {
+            "answer": LLM_UNAVAILABLE_MESSAGE,
+            "sources": reranked,
+            "llm_unavailable": True
+        }
 
 
-    # ---------------------------
-    # Parallel Embedding
-    # ---------------------------
+    if RAG_ENABLE_GROUNDING_CHECK:
+        # ---------------------------
+        # Parallel Embedding
+        # ---------------------------
 
-    answer_vector, context_vectors = await parallel_embeddings(
-        answer,
-        contexts
-    )
+        answer_vector, context_vectors = await parallel_embeddings(
+            answer,
+            contexts
+        )
 
-    # ---------------------------
-    # Grounding check
-    # ---------------------------
+        # ---------------------------
+        # Grounding check
+        # ---------------------------
 
-    max_similarity = max(
-        cosine_similarity(answer_vector, ctx_vec)
-        for ctx_vec in context_vectors
-    )
-
-    logging.info({
-        "event": "grounding_check",
-        "similarity": float(max_similarity)
-    })
-
-    if max_similarity < SEMANTIC_THRESHOLD:
+        max_similarity = max(
+            cosine_similarity(answer_vector, ctx_vec)
+            for ctx_vec in context_vectors
+        )
 
         logging.info({
-            "event": "grounding_failed"
+            "event": "grounding_check",
+            "similarity": float(max_similarity)
         })
 
-        return {
-            "answer": "Ответ не подтверждён базой знаний.",
-            "sources": []
-        }
+        if max_similarity < SEMANTIC_THRESHOLD:
+
+            logging.info({
+                "event": "grounding_failed"
+            })
+
+            return {
+                "answer": "Ответ не подтверждён базой знаний.",
+                "sources": []
+            }
     # ---------------------------
     # Save session
     # ---------------------------

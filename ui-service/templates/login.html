@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG AI | Вход</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main class="auth-page">
+        <section class="auth-shell" aria-label="Авторизация">
+            <div class="auth-card">
+                <div class="auth-brand">
+                    <div class="auth-logo">AI</div>
+                    <div>
+                        <h1>RAG AI</h1>
+                        <p>Войдите в рабочее пространство знаний</p>
+                    </div>
+                </div>
+
+                {% if auth_error %}
+                <div class="auth-alert auth-alert-error" role="alert">{{ auth_error }}</div>
+                {% endif %}
+
+                {% if auth_message %}
+                <div class="auth-alert auth-alert-success" role="status">{{ auth_message }}</div>
+                {% endif %}
+
+                <div class="auth-tabs" role="tablist" aria-label="Режим авторизации">
+                    <button class="auth-tab {% if auth_mode != 'register' %}active{% endif %}" type="button" data-auth-tab="login">Вход</button>
+                    <button class="auth-tab {% if auth_mode == 'register' %}active{% endif %}" type="button" data-auth-tab="register">Регистрация</button>
+                </div>
+
+                <form id="login-form" class="auth-form {% if auth_mode != 'register' %}active{% endif %}" action="/login" method="post">
+                    <label class="auth-field">
+                        <span>Имя пользователя</span>
+                        <input name="username" type="text" autocomplete="username" required autofocus>
+                    </label>
+
+                    <label class="auth-field">
+                        <span>Пароль</span>
+                        <input name="password" type="password" autocomplete="current-password" required>
+                    </label>
+
+                    <button class="auth-submit" type="submit">Войти</button>
+                </form>
+
+                <form id="register-form" class="auth-form {% if auth_mode == 'register' %}active{% endif %}" action="/register" method="post">
+                    <label class="auth-field">
+                        <span>Имя пользователя</span>
+                        <input name="username" type="text" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-zА-Яа-яЁё0-9_.-]+" required>
+                    </label>
+
+                    <label class="auth-field">
+                        <span>Пароль</span>
+                        <input name="password" type="password" autocomplete="new-password" minlength="6" required>
+                    </label>
+
+                    <button class="auth-submit" type="submit">Создать аккаунт</button>
+                </form>
+
+                <p class="auth-note">Новые аккаунты получают роль пользователя. Администраторы задаются в конфигурации.</p>
+            </div>
+
+            <aside class="auth-aside" aria-label="Рабочее пространство">
+                <div class="auth-aside-top">
+                    <span class="auth-status-dot"></span>
+                    <span>Knowledge workspace</span>
+                </div>
+                <h2>Документы, вопросы и ответы в одном окне</h2>
+                <p>Загружайте файлы, создавайте отдельные диалоги и получайте ответы на основе вашей базы знаний.</p>
+                <div class="auth-feature-grid">
+                    <div>
+                        <strong>JWT</strong>
+                        <span>Безопасная сессия</span>
+                    </div>
+                    <div>
+                        <strong>RAG</strong>
+                        <span>Ответы по документам</span>
+                    </div>
+                    <div>
+                        <strong>Roles</strong>
+                        <span>Разделение доступа</span>
+                    </div>
+                </div>
+            </aside>
+        </section>
+    </main>
+
+    <script>
+        const tabs = document.querySelectorAll('[data-auth-tab]');
+        const forms = {
+            login: document.getElementById('login-form'),
+            register: document.getElementById('register-form'),
+        };
+
+        tabs.forEach((tab) => {
+            tab.addEventListener('click', () => {
+                const mode = tab.dataset.authTab;
+
+                tabs.forEach((item) => item.classList.toggle('active', item === tab));
+                Object.entries(forms).forEach(([key, form]) => {
+                    form.classList.toggle('active', key === mode);
+                });
+
+                const firstInput = forms[mode].querySelector('input');
+                if (firstInput) {
+                    firstInput.focus();
+                }
+            });
+        });
+    </script>
+</body>
+</html>

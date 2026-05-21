@@ -8,7 +8,7 @@ app = FastAPI(title="RAG Service")
 LLM_SERVICE_URL = os.getenv("LLM_SERVICE_URL", "http://llm-service:8002/generate")
 VECTOR_SERVICE_URL = os.getenv("VECTOR_SERVICE_URL", "http://embedding-service:8001")
 
-LLM_MODEL = os.getenv("LLM_MODEL", "llama3:8b-instruct-q8_0")
+LLM_MODEL = os.getenv("LLM_MODEL", "mistral:latest")
 
 
 class AskRequest(BaseModel):

@@ -36,10 +36,12 @@
             </div>
 
             <!-- Service Status -->
+            {% if can_view_services %}
             <div class="status-section">
                 <h3>Services</h3>
                 <div id="services-status" class="services-status"></div>
             </div>
+            {% endif %}
         </div>
 
         <!-- Main Content -->
@@ -48,12 +50,23 @@
             <div class="header">
                 <h1 class="title">AI Knowledge Assistant</h1>
                 <div class="header-actions">
+                    <div class="user-chip">
+                        <span id="current-user">{{ user.username }}</span>
+                        <span class="role-badge role-{{ user.role }}">{{ user.role_label }}</span>
+                    </div>
                     <button class="btn-icon" onclick="toggleTheme()" title="Toggle theme">
                         <span id="theme-icon">🌙</span>
                     </button>
+                    {% if can_view_services %}
                     <button class="btn-icon" onclick="refreshServices()" title="Refresh services">
                         <span>🔄</span>
                     </button>
+                    {% endif %}
+                    <form action="/logout" method="post">
+                        <button class="btn-icon logout-btn" type="submit" title="Logout">
+                            <span>Exit</span>
+                        </button>
+                    </form>
                 </div>
             </div>
 
@@ -131,6 +144,7 @@
         // ==================== CONFIGURATION ====================
         const API_BASE = '';
         const LANGUAGE = 'ru';
+        const CAN_VIEW_SERVICES = {{ can_view_services | tojson }};
 
         // ==================== STATE ====================
         let currentSessionId = null;
@@ -138,19 +152,39 @@
         let allSessions = [];
         let isDarkMode = localStorage.getItem('darkMode') === 'true';
 
+        async function apiFetch(url, options = {}, retry = true) {
+            const response = await fetch(url, options);
+
+            if (response.status !== 401 || !retry) {
+                return response;
+            }
+
+            const refreshResponse = await fetch(`${API_BASE}/refresh`, { method: 'POST' });
+            if (!refreshResponse.ok) {
+                window.location.href = '/';
+                return response;
+            }
+
+            return apiFetch(url, options, false);
+        }
+
         // ==================== INITIALIZATION ====================
         window.addEventListener('DOMContentLoaded', () => {
             initializeApp();
             applyTheme();
             loadSessions();
-            refreshServices();
+            if (CAN_VIEW_SERVICES) {
+                refreshServices();
+            }
             setInterval(() => loadSessions(), 30000); // Refresh sessions every 30s
-            setInterval(() => refreshServices(), 60000); // Refresh services every 60s
+            if (CAN_VIEW_SERVICES) {
+                setInterval(() => refreshServices(), 60000); // Refresh services every 60s
+            }
         });
 
         async function initializeApp() {
             try {
-                const response = await fetch(`${API_BASE}/api/session/new`, { method: 'POST' });
+                const response = await apiFetch(`${API_BASE}/api/session/new`, { method: 'POST' });
                 const data = await response.json();
                 currentSessionId = data.session_id;
                 chatMessages = [];
@@ -186,7 +220,7 @@
         // ==================== SESSION MANAGEMENT ====================
         async function startNewSession() {
             try {
-                const response = await fetch(`${API_BASE}/api/session/new`, { method: 'POST' });
+                const response = await apiFetch(`${API_BASE}/api/session/new`, { method: 'POST' });
                 const data = await response.json();
                 currentSessionId = data.session_id;
                 chatMessages = [];
@@ -202,7 +236,7 @@
 
         async function loadSessions() {
             try {
-                const response = await fetch(`${API_BASE}/api/sessions`);
+                const response = await apiFetch(`${API_BASE}/api/sessions`);
                 const data = await response.json();
                 allSessions = data.sessions || [];
                 renderSessions();
@@ -234,7 +268,7 @@
 
         async function switchSession(sessionId) {
             try {
-                const response = await fetch(`${API_BASE}/api/session/${sessionId}/history`);
+                const response = await apiFetch(`${API_BASE}/api/session/${sessionId}/history`);
                 const data = await response.json();
                 currentSessionId = sessionId;
                 chatMessages = data.history || [];
@@ -250,7 +284,7 @@
             event.stopPropagation();
             if (confirm('Delete this session?')) {
                 try {
-                    await fetch(`${API_BASE}/api/session/${sessionId}`, { method: 'DELETE' });
+                    await apiFetch(`${API_BASE}/api/session/${sessionId}`, { method: 'DELETE' });
                     if (currentSessionId === sessionId) {
                         await startNewSession();
                     }
@@ -266,7 +300,7 @@
         // ==================== DOCUMENTS ====================
         async function loadDocuments() {
             try {
-                const response = await fetch(`${API_BASE}/api/documents`);
+                const response = await apiFetch(`${API_BASE}/api/documents`);
                 const data = await response.json();
                 renderDocuments(data.documents || []);
             } catch (error) {
@@ -322,7 +356,7 @@
 
                 showProgress(true);
                 
-                const response = await fetch(`${API_BASE}/upload`, {
+                const response = await apiFetch(`${API_BASE}/upload`, {
                     method: 'POST',
                     body: formData
                 });
@@ -381,7 +415,7 @@
                 formData.append('question', question);
                 formData.append('session_id', currentSessionId);
 
-                const response = await fetch(`${API_BASE}/ask`, {
+                const response = await apiFetch(`${API_BASE}/ask`, {
                     method: 'POST',
                     body: formData
                 });
@@ -488,8 +522,13 @@
 
         // ==================== SERVICES STATUS ====================
         async function refreshServices() {
+            if (!CAN_VIEW_SERVICES) return;
+
             try {
-                const response = await fetch(`${API_BASE}/api/services-status`);
+                const response = await apiFetch(`${API_BASE}/api/services-status`);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch services status');
+                }
                 const data = await response.json();
                 renderServiceStatus(data.services);
             } catch (error) {
@@ -499,6 +538,8 @@
 
         function renderServiceStatus(services) {
             const container = document.getElementById('services-status');
+
+            if (!container || !services) return;
             
             container.innerHTML = Object.entries(services).map(([name, status]) => `
                 <div class="service-item">

@@ -9,8 +9,8 @@ from qdrant_client.models import (
     MatchValue
 )
 
-from app.model import embed_texts, VECTOR_SIZE
-from app.qdrant_client import client, init_collection, COLLECTION_NAME
+from app.model import embed_texts, get_vector_size
+from app.qdrant_client import client, init_collection, collection_exists, COLLECTION_NAME
 
 app = FastAPI(title="Vector Service")
 
@@ -38,9 +38,13 @@ class SearchRequest(BaseModel):
 # Startup
 # =========================
 
+def ensure_collection():
+    init_collection(get_vector_size())
+
+
 @app.on_event("startup")
 def startup():
-    init_collection(VECTOR_SIZE)
+    ensure_collection()
 
 
 # =========================
@@ -67,6 +71,8 @@ def embed(req: EmbedRequest):
 
 @app.get("/documents")
 def list_documents():
+    if not collection_exists():
+        return []
 
     scroll = client.scroll(
         collection_name=COLLECTION_NAME,
@@ -140,6 +146,7 @@ def index(req: IndexRequest):
         return {"error": "document_id is required for indexing"}
 
     vectors = embed_texts(req.texts)
+    ensure_collection()
 
     # 🔥 Удаляем старые chunks документа
     client.delete(
@@ -199,12 +206,16 @@ def reindex(document_id: str):
 @app.post("/search")
 def search(req: SearchRequest):
 
+    top_k = max(1, min(req.top_k, 30))
     query_vector = embed_texts([req.query])[0]
+    ensure_collection()
 
     results = client.query_points(
     collection_name=COLLECTION_NAME,
     query=query_vector,
-    limit=req.top_k,
+    limit=top_k,
+    with_payload=True,
+    with_vectors=False,
     query_filter=Filter(
         must_not=[
             FieldCondition(
