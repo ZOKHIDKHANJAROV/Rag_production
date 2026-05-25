@@ -12,6 +12,7 @@ services:
 
   redis:
     image: redis:7
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "6379:6379"
     volumes:
@@ -28,6 +29,10 @@ services:
       - hf_cache:/root/.cache/huggingface
     depends_on:
       - qdrant
+    environment:
+      - EMBEDDING_CONCURRENCY=4
+      - EMBEDDING_BATCH_SIZE=32
+      - EMBEDDING_WORKERS=1
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
       interval: 15s
@@ -44,6 +49,11 @@ services:
       - "8002:8002"
     depends_on:
       - redis
+    environment:
+      - REQUEST_TIMEOUT=60
+      - LLM_CONCURRENCY=4
+      - LLM_WORKERS=1
+      - OLLAMA_KEEP_ALIVE=30m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
       interval: 15s
@@ -68,6 +78,15 @@ services:
     environment:
       - LLM_SERVICE_URL=http://llm-service:8002/generate
       - VECTOR_SERVICE_URL=http://embedding-service:8001
+      - REQUEST_TIMEOUT=60
+      - RAG_WORKERS=4
+      - RAG_LLM_CONCURRENCY=8
+      - RAG_VECTOR_CONCURRENCY=32
+      - RAG_CACHE_TTL=1800
+      - RAG_SEARCH_CANDIDATES=12
+      - RAG_FINAL_TOP_K=4
+      - RAG_MAX_CONTEXT_CHARS=3500
+      - RAG_MAX_ANSWER_TOKENS=512
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
       interval: 15s
@@ -101,6 +120,11 @@ services:
       - "8000:8000"
     volumes:
       - ui_data:/app/data
+    environment:
+      - REQUEST_TIMEOUT=60
+      - UI_WORKERS=1
+      - UI_HTTP_MAX_CONNECTIONS=200
+      - UI_HTTP_MAX_KEEPALIVE=50
     depends_on:
       rag-service:
         condition: service_healthy

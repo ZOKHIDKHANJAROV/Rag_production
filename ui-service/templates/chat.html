@@ -3,153 +3,203 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RAG Knowledge Assistant</title>
+    <title>AI Чат АГМК</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="app-container">
-        <!-- Sidebar -->
-        <div class="sidebar">
+        <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <span class="logo-icon">🧠</span>
-                    <span class="logo-text">RAG AI</span>
+                    <img class="brand-logo" src="/static/agmkl-logo.png" alt="АГМК">
+                    <div>
+                        <span class="logo-text">AI Чат АГМК</span>
+                        <span class="logo-subtitle">Корпоративная база знаний</span>
+                    </div>
                 </div>
             </div>
 
-            <!-- New Chat Button -->
             <button class="new-chat-btn" onclick="startNewSession()">
                 <span class="icon">+</span>
-                <span>New Chat</span>
+                <span>Новый чат</span>
             </button>
 
-            <!-- Sessions List -->
-            <div class="sessions-section">
-                <h3>Sessions</h3>
+            <div class="sessions-section panel-section">
+                <h3>Диалоги</h3>
                 <div id="sessions-list" class="sessions-list"></div>
             </div>
 
-            <!-- Documents Panel -->
-            <div class="documents-section">
-                <h3>Documents</h3>
+            <div class="documents-section panel-section">
+                <h3>Документы</h3>
                 <div id="documents-list" class="documents-list"></div>
             </div>
 
-            <!-- Service Status -->
             {% if can_view_services %}
-            <div class="status-section">
-                <h3>Services</h3>
+            <div class="status-section panel-section">
+                <h3>Сервисы</h3>
                 <div id="services-status" class="services-status"></div>
             </div>
             {% endif %}
-        </div>
+        </aside>
 
-        <!-- Main Content -->
-        <div class="main-content">
-            <!-- Header -->
-            <div class="header">
-                <h1 class="title">AI Knowledge Assistant</h1>
+        <main class="main-content">
+            <header class="header">
+                <div>
+                    <p class="header-kicker">Интеллектуальный помощник</p>
+                    <h1 class="title">AI Чат АГМК</h1>
+                </div>
                 <div class="header-actions">
                     <div class="user-chip">
                         <span id="current-user">{{ user.username }}</span>
                         <span class="role-badge role-{{ user.role }}">{{ user.role_label }}</span>
                     </div>
-                    <button class="btn-icon" onclick="toggleTheme()" title="Toggle theme">
-                        <span id="theme-icon">🌙</span>
+                    <button class="btn-icon" onclick="toggleTheme()" title="Переключить тему" aria-label="Переключить тему">
+                        <span id="theme-icon">☾</span>
                     </button>
                     {% if can_view_services %}
-                    <button class="btn-icon" onclick="refreshServices()" title="Refresh services">
-                        <span>🔄</span>
+                    <button class="btn-icon" onclick="refreshServices()" title="Обновить сервисы" aria-label="Обновить сервисы">
+                        <span>↻</span>
+                    </button>
+                    {% endif %}
+                    {% if can_manage_admin %}
+                    <button class="admin-open-btn" onclick="toggleAdminPanel()" title="Админ-панель">
+                        <span>Админ</span>
                     </button>
                     {% endif %}
                     <form action="/logout" method="post">
-                        <button class="btn-icon logout-btn" type="submit" title="Logout">
-                            <span>Exit</span>
+                        <button class="btn-icon logout-btn" type="submit" title="Выйти">
+                            <span>Выйти</span>
                         </button>
                     </form>
                 </div>
-            </div>
+            </header>
 
-            <!-- Chat Area -->
-            <div class="chat-area">
-                <div id="chat-container" class="chat-container">
-                    <div class="empty-state">
-                        <div class="empty-icon">💬</div>
-                        <h2>Welcome to RAG AI Assistant</h2>
-                        <p>Upload documents and ask questions about them</p>
+            {% if can_manage_admin %}
+            <section id="admin-panel" class="admin-panel hidden">
+                <div class="admin-panel-header">
+                    <div>
+                        <p class="header-kicker">Управление системой</p>
+                        <h2>Админ-панель</h2>
+                    </div>
+                    <button class="btn-close" onclick="toggleAdminPanel()" aria-label="Закрыть админ-панель">×</button>
+                </div>
+
+                <div class="admin-tabs">
+                    <button id="admin-tab-users" class="admin-tab active" onclick="setAdminTab('users')">Пользователи</button>
+                    <button id="admin-tab-databases" class="admin-tab" onclick="setAdminTab('databases')">Базы знаний</button>
+                </div>
+
+                <div id="admin-users-view" class="admin-view">
+                    <form class="admin-create-user" onsubmit="createAdminUser(event)">
+                        <input id="admin-new-username" type="text" placeholder="Логин" autocomplete="off">
+                        <input id="admin-new-password" type="password" placeholder="Пароль">
+                        <select id="admin-new-role">
+                            <option value="user">Обычный пользователь</option>
+                            <option value="admin">Админ</option>
+                        </select>
+                        <button type="submit">Создать</button>
+                    </form>
+                    <div id="admin-users-list" class="admin-table"></div>
+                </div>
+
+                <div id="admin-databases-view" class="admin-view hidden">
+                    <div class="admin-db-layout">
+                        <div>
+                            <h3>Базы</h3>
+                            <div id="admin-databases-list" class="admin-db-list"></div>
+                        </div>
+                        <div>
+                            <div class="admin-docs-header">
+                                <h3 id="admin-documents-title">Документы</h3>
+                                <button class="admin-light-btn" onclick="loadAdminDatabases()">Обновить</button>
+                            </div>
+                            <div id="admin-documents-list" class="admin-table"></div>
+                        </div>
                     </div>
                 </div>
-            </div>
+            </section>
+            {% endif %}
 
-            <!-- Sources Panel -->
-            <div id="sources-panel" class="sources-panel">
+            <section class="chat-area">
+                <div id="chat-container" class="chat-container">
+                    <div class="empty-state">
+                        <img class="empty-logo" src="/static/agmkl-logo.png" alt="АГМК">
+                        <h2>Задайте вопрос по документам АГМК</h2>
+                        <p>Загрузите регламент, инструкцию или отчет, затем спросите ассистента о нужной информации.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="sources-panel" class="sources-panel hidden">
                 <div class="sources-header">
-                    <h3>Sources</h3>
-                    <button class="btn-close" onclick="closeSources()">×</button>
+                    <h3>Источники ответа</h3>
+                    <button class="btn-close" onclick="closeSources()" aria-label="Закрыть источники">×</button>
                 </div>
                 <div id="sources-content" class="sources-content"></div>
-            </div>
+            </section>
 
-            <!-- Input Area -->
-            <div class="input-section">
-                <!-- File Upload -->
+            <section class="input-section">
                 <div class="file-upload-area">
-                    <input 
-                        type="file" 
-                        id="file-input" 
+                    {% if can_manage_admin %}
+                    <select id="upload-scope" class="upload-scope" title="Куда загрузить документ">
+                        <option value="personal">Моя личная база</option>
+                        <option value="global">Основная база</option>
+                    </select>
+                    {% endif %}
+                    <input
+                        type="file"
+                        id="file-input"
                         accept=".pdf,.txt,.doc,.docx,.md"
                         onchange="handleFileSelect()"
                     >
                     <label for="file-input" class="file-label">
-                        <span class="upload-icon">📎</span>
-                        <span id="file-name">Attach file</span>
+                        <span class="upload-icon">↥</span>
+                        <span id="file-name">Прикрепить документ</span>
                     </label>
                     <div id="upload-progress" class="upload-progress hidden">
                         <div class="progress-bar">
                             <div id="progress-fill" class="progress-fill"></div>
                         </div>
-                        <span id="progress-text">Uploading...</span>
+                        <span id="progress-text">Загрузка документа...</span>
                     </div>
                 </div>
 
-                <!-- Question Input -->
                 <div class="input-wrapper">
                     <input
                         type="text"
                         id="question-input"
                         class="question-input"
-                        placeholder="Ask a question..."
+                        placeholder="Спросите по базе знаний АГМК..."
                         onkeypress="handleKeyPress(event)"
                         autocomplete="off"
                     >
                     <button class="send-btn" onclick="sendQuestion()">
-                        <span>Send</span>
+                        <span>Отправить</span>
                         <span class="send-icon">→</span>
                     </button>
                 </div>
 
-                <!-- Loading Indicator -->
                 <div id="loading-indicator" class="loading-indicator hidden">
                     <div class="spinner"></div>
-                    <span>Processing...</span>
+                    <span>Обработка запроса...</span>
                 </div>
-            </div>
-        </div>
+            </section>
+        </main>
     </div>
 
-    <!-- Toast Notification -->
     <div id="toast" class="toast"></div>
 
     <script>
-        // ==================== CONFIGURATION ====================
         const API_BASE = '';
         const LANGUAGE = 'ru';
         const CAN_VIEW_SERVICES = {{ can_view_services | tojson }};
+        const CAN_MANAGE_ADMIN = {{ can_manage_admin | tojson }};
+        const CURRENT_USER = {{ user.username | tojson }};
 
-        // ==================== STATE ====================
         let currentSessionId = null;
         let chatMessages = [];
         let allSessions = [];
+        let adminActiveScope = 'global';
         let isDarkMode = localStorage.getItem('darkMode') === 'true';
 
         async function apiFetch(url, options = {}, retry = true) {
@@ -168,7 +218,6 @@
             return apiFetch(url, options, false);
         }
 
-        // ==================== INITIALIZATION ====================
         window.addEventListener('DOMContentLoaded', () => {
             initializeApp();
             applyTheme();
@@ -176,9 +225,13 @@
             if (CAN_VIEW_SERVICES) {
                 refreshServices();
             }
-            setInterval(() => loadSessions(), 30000); // Refresh sessions every 30s
+            if (CAN_MANAGE_ADMIN) {
+                loadAdminUsers();
+                loadAdminDatabases();
+            }
+            setInterval(() => loadSessions(), 30000);
             if (CAN_VIEW_SERVICES) {
-                setInterval(() => refreshServices(), 60000); // Refresh services every 60s
+                setInterval(() => refreshServices(), 60000);
             }
         });
 
@@ -189,15 +242,14 @@
                 currentSessionId = data.session_id;
                 chatMessages = [];
                 renderChat();
-                logMessage('Session started', 'info');
+                logMessage('Сессия запущена', 'info');
                 loadDocuments();
             } catch (error) {
-                console.error('Failed to initialize session:', error);
-                showToast('Failed to start session', 'error');
+                console.error('Не удалось создать сессию:', error);
+                showToast('Не удалось открыть чат', 'error');
             }
         }
 
-        // ==================== THEME ====================
         function toggleTheme() {
             isDarkMode = !isDarkMode;
             localStorage.setItem('darkMode', isDarkMode);
@@ -207,17 +259,16 @@
         function applyTheme() {
             const html = document.documentElement;
             const icon = document.getElementById('theme-icon');
-            
+
             if (isDarkMode) {
                 html.setAttribute('data-theme', 'dark');
-                icon.textContent = '☀️';
+                icon.textContent = '☀';
             } else {
                 html.setAttribute('data-theme', 'light');
-                icon.textContent = '🌙';
+                icon.textContent = '☾';
             }
         }
 
-        // ==================== SESSION MANAGEMENT ====================
         async function startNewSession() {
             try {
                 const response = await apiFetch(`${API_BASE}/api/session/new`, { method: 'POST' });
@@ -225,12 +276,13 @@
                 currentSessionId = data.session_id;
                 chatMessages = [];
                 document.getElementById('question-input').value = '';
+                closeSources();
                 renderChat();
                 loadSessions();
-                showToast('New session started', 'success');
+                showToast('Новый чат создан', 'success');
             } catch (error) {
-                console.error('Failed to create session:', error);
-                showToast('Failed to create new session', 'error');
+                console.error('Не удалось создать новый чат:', error);
+                showToast('Не удалось создать новый чат', 'error');
             }
         }
 
@@ -241,7 +293,7 @@
                 allSessions = data.sessions || [];
                 renderSessions();
             } catch (error) {
-                console.error('Failed to load sessions:', error);
+                console.error('Не удалось загрузить диалоги:', error);
             }
         }
 
@@ -250,18 +302,18 @@
             const recentSessions = allSessions.slice(-5).reverse();
 
             if (recentSessions.length === 0) {
-                container.innerHTML = '<div class="empty-sessions">No sessions yet</div>';
+                container.innerHTML = '<div class="empty-sessions">Диалогов пока нет</div>';
                 return;
             }
 
             container.innerHTML = recentSessions.map(session => `
-                <div class="session-item ${session.session_id === currentSessionId ? 'active' : ''}" 
+                <div class="session-item ${session.session_id === currentSessionId ? 'active' : ''}"
                      onclick="switchSession('${session.session_id}')">
                     <div class="session-info">
                         <div class="session-time">${formatTime(session.created)}</div>
-                        <div class="session-preview">${session.history.length} messages</div>
+                        <div class="session-preview">${session.history.length} сообщений</div>
                     </div>
-                    <button class="session-delete" onclick="deleteSession('${session.session_id}', event)">×</button>
+                    <button class="session-delete" onclick="deleteSession('${session.session_id}', event)" title="Удалить диалог">×</button>
                 </div>
             `).join('');
         }
@@ -272,76 +324,74 @@
                 const data = await response.json();
                 currentSessionId = sessionId;
                 chatMessages = data.history || [];
+                closeSources();
                 renderChat();
                 renderSessions();
             } catch (error) {
-                console.error('Failed to switch session:', error);
-                showToast('Failed to switch session', 'error');
+                console.error('Не удалось переключить диалог:', error);
+                showToast('Не удалось открыть диалог', 'error');
             }
         }
 
         async function deleteSession(sessionId, event) {
             event.stopPropagation();
-            if (confirm('Delete this session?')) {
+            if (confirm('Удалить этот диалог?')) {
                 try {
                     await apiFetch(`${API_BASE}/api/session/${sessionId}`, { method: 'DELETE' });
                     if (currentSessionId === sessionId) {
                         await startNewSession();
                     }
                     await loadSessions();
-                    showToast('Session deleted', 'success');
+                    showToast('Диалог удален', 'success');
                 } catch (error) {
-                    console.error('Failed to delete session:', error);
-                    showToast('Failed to delete session', 'error');
+                    console.error('Не удалось удалить диалог:', error);
+                    showToast('Не удалось удалить диалог', 'error');
                 }
             }
         }
 
-        // ==================== DOCUMENTS ====================
         async function loadDocuments() {
             try {
                 const response = await apiFetch(`${API_BASE}/api/documents`);
                 const data = await response.json();
                 renderDocuments(data.documents || []);
             } catch (error) {
-                console.error('Failed to load documents:', error);
+                console.error('Не удалось загрузить документы:', error);
             }
         }
 
         function renderDocuments(documents) {
             const container = document.getElementById('documents-list');
-            
+
             if (!documents || documents.length === 0) {
-                container.innerHTML = '<div class="empty-documents">No documents</div>';
+                container.innerHTML = '<div class="empty-documents">Документы не загружены</div>';
                 return;
             }
 
             container.innerHTML = documents.slice(0, 10).map((doc, idx) => `
                 <div class="document-item">
-                    <div class="doc-icon">📄</div>
+                    <div class="doc-icon">□</div>
                     <div class="doc-info">
-                        <div class="doc-name">${doc.filename || doc.name || `Doc ${idx + 1}`}</div>
-                        <div class="doc-meta">${doc.chunks || doc.size || '?'} chunks</div>
+                        <div class="doc-name">${escapeHtml(doc.filename || doc.name || `Документ ${idx + 1}`)}</div>
+                        <div class="doc-meta">${doc.chunks || doc.size || '?'} фрагментов</div>
                     </div>
                 </div>
             `).join('');
         }
 
-        // ==================== FILE UPLOAD ====================
         function handleFileSelect() {
             const input = document.getElementById('file-input');
             const file = input.files[0];
-            
+
             if (!file) return;
 
             const fileName = file.name;
             document.getElementById('file-name').textContent = fileName;
 
-            // Validate file size (max 50MB)
             if (file.size > 50 * 1024 * 1024) {
-                showToast('File too large (max 50MB)', 'error');
+                showToast('Файл слишком большой: максимум 50 МБ', 'error');
                 input.value = '';
-                document.getElementById('file-name').textContent = 'Attach file';
+                document.getElementById('file-name').textContent = 'Прикрепить документ';
                 return;
             }
 
@@ -353,9 +403,13 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 formData.append('session_id', currentSessionId);
+                if (CAN_MANAGE_ADMIN) {
+                    const uploadScope = document.getElementById('upload-scope').value;
+                    formData.append('scope_key', uploadScope === 'global' ? 'global' : `user:${CURRENT_USER}`);
+                }
 
                 showProgress(true);
-                
+
                 const response = await apiFetch(`${API_BASE}/upload`, {
                     method: 'POST',
                     body: formData
@@ -365,40 +419,33 @@
                     throw new Error('Upload failed');
                 }
 
-                const data = await response.json();
-                showToast(`Document uploaded: ${file.name}`, 'success');
-                
-                // Reset file input
+                showToast(`Документ загружен: ${file.name}`, 'success');
+
                 document.getElementById('file-input').value = '';
-                document.getElementById('file-name').textContent = 'Attach file';
-                
-                // Refresh documents
+                document.getElementById('file-name').textContent = 'Прикрепить документ';
+
                 loadDocuments();
-                
-                // Add system message
+
                 chatMessages.push({
                     type: 'system',
-                    content: `Document uploaded: ${file.name}`,
+                    content: `Документ загружен: ${file.name}`,
                     timestamp: new Date().toISOString()
                 });
                 renderChat();
-
             } catch (error) {
-                console.error('Upload error:', error);
-                showToast('Failed to upload document', 'error');
+                console.error('Ошибка загрузки:', error);
+                showToast('Не удалось загрузить документ', 'error');
             } finally {
                 showProgress(false);
             }
         }
 
-        // ==================== CHAT ====================
         async function sendQuestion() {
             const input = document.getElementById('question-input');
             const question = input.value.trim();
 
             if (!question) return;
 
-            // Add user message to chat
             chatMessages.push({
                 type: 'question',
                 content: question,
@@ -406,6 +453,7 @@
             });
 
             input.value = '';
+            closeSources();
             renderChat();
 
             try {
@@ -426,7 +474,6 @@
 
                 const data = await response.json();
 
-                // Add AI response
                 chatMessages.push({
                     type: 'answer',
                     content: data.answer,
@@ -435,20 +482,19 @@
                 });
 
                 renderChat();
-                
+
                 if (data.sources && data.sources.length > 0) {
                     showSources(data.sources);
                 }
-
             } catch (error) {
-                console.error('Error:', error);
+                console.error('Ошибка:', error);
                 chatMessages.push({
                     type: 'error',
-                    content: 'Sorry, I encountered an error. Please try again.',
+                    content: 'Не удалось обработать вопрос. Попробуйте еще раз.',
                     timestamp: new Date().toISOString()
                 });
                 renderChat();
-                showToast('Error processing question', 'error');
+                showToast('Ошибка обработки вопроса', 'error');
             } finally {
                 showLoading(false);
             }
@@ -456,19 +502,19 @@
 
         function renderChat() {
             const container = document.getElementById('chat-container');
-            
+
             if (chatMessages.length === 0) {
                 container.innerHTML = `
                     <div class="empty-state">
-                        <div class="empty-icon">💬</div>
-                        <h2>Welcome to RAG AI Assistant</h2>
-                        <p>Upload documents and ask questions about them</p>
+                        <img class="empty-logo" src="/static/agmkl-logo.png" alt="АГМК">
+                        <h2>Задайте вопрос по документам АГМК</h2>
+                        <p>Загрузите регламент, инструкцию или отчет, затем спросите ассистента о нужной информации.</p>
                     </div>
                 `;
                 return;
             }
 
-            container.innerHTML = chatMessages.map((msg, idx) => {
+            container.innerHTML = chatMessages.map((msg) => {
                 const classes = `message message-${msg.type}`;
                 let contentHtml = '';
 
@@ -477,9 +523,9 @@
                 } else if (msg.type === 'answer') {
                     contentHtml = `
                         <div class="message-content">
-                            ${msg.content ? escapeHtml(msg.content) : 'Processing...'}
-                            ${msg.sources && msg.sources.length > 0 ? 
-                                `<div class="sources-note">📚 ${msg.sources.length} sources</div>` : ''}
+                            ${msg.content ? escapeHtml(msg.content) : 'Обработка...'}
+                            ${msg.sources && msg.sources.length > 0 ?
+                                `<button class="sources-note" onclick="showMessageSources('${msg.timestamp}')">${msg.sources.length} источников</button>` : ''}
                         </div>
                     `;
                 } else if (msg.type === 'system') {
@@ -491,7 +537,6 @@
                 return `<div class="${classes}">${contentHtml}</div>`;
             }).join('');
 
-            // Scroll to bottom
             container.scrollTop = container.scrollHeight;
         }
 
@@ -508,7 +553,7 @@
             content.innerHTML = sources.map((source, idx) => `
                 <div class="source-item">
                     <div class="source-header">
-                        <strong>${escapeHtml(source.filename || `Source ${idx + 1}`)}</strong>
+                        <strong>${escapeHtml(source.filename || `Источник ${idx + 1}`)}</strong>
                         <span class="source-score">${formatScore(source.score)}</span>
                     </div>
                     <div class="source-text">${escapeHtml(source.text || '')}</div>
@@ -516,11 +561,15 @@
             `).join('');
         }
 
+        function showMessageSources(timestamp) {
+            const message = chatMessages.find((item) => item.timestamp === timestamp);
+            showSources(message ? message.sources : []);
+        }
+
         function closeSources() {
             document.getElementById('sources-panel').classList.add('hidden');
         }
 
-        // ==================== SERVICES STATUS ====================
         async function refreshServices() {
             if (!CAN_VIEW_SERVICES) return;
 
@@ -532,7 +581,7 @@
                 const data = await response.json();
                 renderServiceStatus(data.services);
             } catch (error) {
-                console.error('Failed to fetch services status:', error);
+                console.error('Не удалось обновить статус сервисов:', error);
             }
         }
 
@@ -540,16 +589,197 @@
             const container = document.getElementById('services-status');
 
             if (!container || !services) return;
-            
+
             container.innerHTML = Object.entries(services).map(([name, status]) => `
                 <div class="service-item">
                     <div class="service-indicator ${status.status}"></div>
-                    <div class="service-name">${name}</div>
+                    <div class="service-name">${escapeHtml(name)}</div>
                 </div>
             `).join('');
         }
 
-        // ==================== UI HELPERS ====================
+        function toggleAdminPanel() {
+            const panel = document.getElementById('admin-panel');
+            if (!panel) return;
+            panel.classList.toggle('hidden');
+            if (!panel.classList.contains('hidden')) {
+                loadAdminUsers();
+                loadAdminDatabases();
+            }
+        }
+
+        function setAdminTab(tab) {
+            document.getElementById('admin-tab-users').classList.toggle('active', tab === 'users');
+            document.getElementById('admin-tab-databases').classList.toggle('active', tab === 'databases');
+            document.getElementById('admin-users-view').classList.toggle('hidden', tab !== 'users');
+            document.getElementById('admin-databases-view').classList.toggle('hidden', tab !== 'databases');
+        }
+
+        async function loadAdminUsers() {
+            if (!CAN_MANAGE_ADMIN) return;
+            const response = await apiFetch(`${API_BASE}/api/admin/users`);
+            if (!response.ok) return;
+            const data = await response.json();
+            renderAdminUsers(data.users || []);
+        }
+
+        function renderAdminUsers(users) {
+            const container = document.getElementById('admin-users-list');
+            if (!container) return;
+
+            container.innerHTML = users.map((user) => `
+                <div class="admin-row">
+                    <div>
+                        <strong>${escapeHtml(user.username)}</strong>
+                        <span>${escapeHtml(user.role_label)} · ${user.sessions || 0} диалогов</span>
+                    </div>
+                    <div class="admin-row-actions">
+                        <select onchange="updateAdminUser('${escapeHtml(user.username)}', { role: this.value })">
+                            <option value="user" ${user.role === 'user' ? 'selected' : ''}>Пользователь</option>
+                            <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Админ</option>
+                        </select>
+                        <button onclick="resetAdminPassword('${escapeHtml(user.username)}')">Пароль</button>
+                        <button class="danger" onclick="deleteAdminUser('${escapeHtml(user.username)}')" ${user.username === CURRENT_USER ? 'disabled' : ''}>Удалить</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function createAdminUser(event) {
+            event.preventDefault();
+            const username = document.getElementById('admin-new-username').value.trim();
+            const password = document.getElementById('admin-new-password').value;
+            const role = document.getElementById('admin-new-role').value;
+            if (!username || !password) return;
+
+            const response = await apiFetch(`${API_BASE}/api/admin/users`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role })
+            });
+
+            if (!response.ok) {
+                showToast('Не удалось создать пользователя', 'error');
+                return;
+            }
+
+            document.getElementById('admin-new-username').value = '';
+            document.getElementById('admin-new-password').value = '';
+            showToast('Пользователь создан', 'success');
+            loadAdminUsers();
+            loadAdminDatabases();
+        }
+
+        async function updateAdminUser(username, payload) {
+            const response = await apiFetch(`${API_BASE}/api/admin/users/${encodeURIComponent(username)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                showToast('Не удалось обновить пользователя', 'error');
+                return;
+            }
+
+            showToast('Пользователь обновлен', 'success');
+            loadAdminUsers();
+        }
+
+        async function resetAdminPassword(username) {
+            const password = prompt(`Новый пароль для ${username}`);
+            if (!password) return;
+            await updateAdminUser(username, { password });
+        }
+
+        async function deleteAdminUser(username) {
+            if (!confirm(`Удалить пользователя ${username} и его личную базу?`)) return;
+
+            const response = await apiFetch(`${API_BASE}/api/admin/users/${encodeURIComponent(username)}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                showToast('Не удалось удалить пользователя', 'error');
+                return;
+            }
+
+            showToast('Пользователь удален', 'success');
+            loadAdminUsers();
+            loadAdminDatabases();
+            loadAdminDocuments(adminActiveScope);
+        }
+
+        async function loadAdminDatabases() {
+            if (!CAN_MANAGE_ADMIN) return;
+            const response = await apiFetch(`${API_BASE}/api/admin/databases`);
+            if (!response.ok) return;
+            const data = await response.json();
+            renderAdminDatabases(data.databases || []);
+            loadAdminDocuments(adminActiveScope);
+        }
+
+        function renderAdminDatabases(databases) {
+            const container = document.getElementById('admin-databases-list');
+            if (!container) return;
+
+            container.innerHTML = databases.map((db) => `
+                <button class="admin-db-item ${db.scope_key === adminActiveScope ? 'active' : ''}" onclick="loadAdminDocuments('${escapeHtml(db.scope_key)}')">
+                    <span>${escapeHtml(db.name)}</span>
+                    <strong>${db.documents}</strong>
+                </button>
+            `).join('');
+        }
+
+        async function loadAdminDocuments(scopeKey) {
+            adminActiveScope = scopeKey || 'global';
+            const response = await apiFetch(`${API_BASE}/api/admin/documents?scope_key=${encodeURIComponent(adminActiveScope)}`);
+            if (!response.ok) return;
+            const data = await response.json();
+            renderAdminDocuments(data.documents || []);
+            const title = document.getElementById('admin-documents-title');
+            if (title) title.textContent = `Документы: ${adminActiveScope}`;
+        }
+
+        function renderAdminDocuments(documents) {
+            const container = document.getElementById('admin-documents-list');
+            if (!container) return;
+
+            if (!documents.length) {
+                container.innerHTML = '<div class="admin-empty">В этой базе пока нет документов</div>';
+                return;
+            }
+
+            container.innerHTML = documents.map((doc) => `
+                <div class="admin-row">
+                    <div>
+                        <strong>${escapeHtml(doc.filename || doc.document_id)}</strong>
+                        <span>${escapeHtml(doc.scope_key || 'global')} · ${doc.chunks || 0} фрагментов</span>
+                    </div>
+                    <div class="admin-row-actions">
+                        <button class="danger" onclick="deleteAdminDocument('${escapeHtml(doc.document_id)}', '${escapeHtml(doc.scope_key || 'global')}')">Удалить</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function deleteAdminDocument(documentId, scopeKey) {
+            if (!confirm('Удалить документ из выбранной базы?')) return;
+
+            const response = await apiFetch(`${API_BASE}/api/admin/documents/${encodeURIComponent(documentId)}?scope_key=${encodeURIComponent(scopeKey)}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                showToast('Не удалось удалить документ', 'error');
+                return;
+            }
+
+            showToast('Документ удален', 'success');
+            loadAdminDatabases();
+            loadDocuments();
+        }
+
         function handleKeyPress(event) {
             if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -558,21 +788,11 @@
         }
 
         function showLoading(show) {
-            const indicator = document.getElementById('loading-indicator');
-            if (show) {
-                indicator.classList.remove('hidden');
-            } else {
-                indicator.classList.add('hidden');
-            }
+            document.getElementById('loading-indicator').classList.toggle('hidden', !show);
         }
 
         function showProgress(show) {
-            const progress = document.getElementById('upload-progress');
-            if (show) {
-                progress.classList.remove('hidden');
-            } else {
-                progress.classList.add('hidden');
-            }
+            document.getElementById('upload-progress').classList.toggle('hidden', !show);
         }
 
         function showToast(message, type = 'info') {
@@ -586,7 +806,6 @@
             }, 3000);
         }
 
-        // ==================== UTILITIES ====================
         function escapeHtml(text) {
             const map = {
                 '&': '&amp;',
@@ -595,7 +814,7 @@
                 '"': '&quot;',
                 "'": '&#039;'
             };
-            return text.replace(/[&<>"']/g, m => map[m]);
+            return String(text || '').replace(/[&<>"']/g, m => map[m]);
         }
 
         function formatTime(isoString) {
@@ -609,7 +828,11 @@
         }
 
         function formatScore(score) {
-            return `${(score * 100).toFixed(0)}%`;
+            const value = Number(score);
+            if (!Number.isFinite(value)) {
+                return '—';
+            }
+            return `${(value * 100).toFixed(0)}%`;
         }
 
         function logMessage(msg, type = 'log') {

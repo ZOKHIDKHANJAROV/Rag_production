@@ -14,7 +14,7 @@ def collection_exists():
     return COLLECTION_NAME in [c.name for c in collections]
 
 def _ensure_payload_indexes():
-    for field in ("document_id", "is_deleted"):
+    for field in ("document_id", "is_deleted", "scope_key", "owner_username", "knowledge_base"):
         try:
             client.create_payload_index(
                 collection_name=COLLECTION_NAME,

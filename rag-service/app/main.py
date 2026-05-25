@@ -3,7 +3,7 @@ import numpy as np
 import logging
 import os
 import asyncio
-import redis
+import redis.asyncio as redis
 import json
 import hashlib
 import re
@@ -11,7 +11,7 @@ import re
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from prometheus_client import Counter, Histogram, generate_latest
 
 app = FastAPI(title="AI Service")
@@ -43,7 +43,12 @@ CACHE_COLLECTION = "semantic_cache"
 CACHE_THRESHOLD = 0.92
 RAG_CACHE_TTL = int(os.getenv("RAG_CACHE_TTL", "600"))
 RAG_CACHE_VERSION = "lang-v2"
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))
+RAG_HTTP_MAX_CONNECTIONS = int(os.getenv("RAG_HTTP_MAX_CONNECTIONS", "200"))
+RAG_HTTP_MAX_KEEPALIVE = int(os.getenv("RAG_HTTP_MAX_KEEPALIVE", "50"))
+RAG_LLM_CONCURRENCY = int(os.getenv("RAG_LLM_CONCURRENCY", "8"))
+RAG_VECTOR_CONCURRENCY = int(os.getenv("RAG_VECTOR_CONCURRENCY", "32"))
+RAG_MAX_ANSWER_TOKENS = int(os.getenv("RAG_MAX_ANSWER_TOKENS", "512"))
 LLM_UNAVAILABLE_MESSAGE = (
     "LLM service is unavailable or the requested Ollama model is not installed. "
     "Relevant sources were found, but generation cannot be completed yet."
@@ -59,9 +64,30 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-def build_rag_cache_key(question):
+def build_rag_cache_key(question, scope_keys=None):
     raw = question.strip().lower()
-    return f"rag:{RAG_CACHE_VERSION}:" + hashlib.sha256(raw.encode()).hexdigest()
+    scopes = ",".join(sorted(scope_keys or ["global"]))
+    return f"rag:{RAG_CACHE_VERSION}:" + hashlib.sha256(f"{scopes}:{raw}".encode()).hexdigest()
+
+def is_negative_or_empty_answer(answer):
+    normalized = re.sub(r"\s+", " ", (answer or "").strip().lower())
+
+    if not normalized:
+        return True
+
+    negative_patterns = (
+        "no information",
+        "not found",
+        "nothing found",
+        "no relevant",
+        "\u043d\u0435\u0442 \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u0438",
+        "\u043d\u0435\u0442 \u0442\u0430\u043a\u043e\u0439 \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u0438",
+        "\u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d",
+        "\u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d",
+        "\u043a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442",
+    )
+
+    return any(pattern in normalized for pattern in negative_patterns)
 
 def response_language_instruction(question):
     cyrillic_count = sum(1 for ch in question.lower() if "\u0430" <= ch <= "\u044f" or ch == "\u0451")
@@ -71,9 +97,9 @@ def response_language_instruction(question):
 
     return "Answer strictly in the same language as the user's question."
 
-def get_history(session_id):
+async def get_history(session_id):
 
-    history = redis_client.get(session_id)
+    history = await redis_client.get(session_id)
 
     if not history:
         return []
@@ -81,9 +107,9 @@ def get_history(session_id):
     return json.loads(history)
 
 
-def save_history(session_id, history):
+async def save_history(session_id, history):
 
-    redis_client.set(
+    await redis_client.set(
         session_id,
         json.dumps(history),
         ex=3600
@@ -93,11 +119,20 @@ def save_history(session_id, history):
 # Async HTTP client
 # ---------------------------
 
-client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+client = httpx.AsyncClient(
+    timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=5.0),
+    limits=httpx.Limits(
+        max_connections=RAG_HTTP_MAX_CONNECTIONS,
+        max_keepalive_connections=RAG_HTTP_MAX_KEEPALIVE
+    )
+)
+llm_semaphore = asyncio.Semaphore(RAG_LLM_CONCURRENCY)
+vector_semaphore = asyncio.Semaphore(RAG_VECTOR_CONCURRENCY)
 
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
+    await redis_client.aclose()
 
 # ---------------------------
 # Logging
@@ -140,6 +175,7 @@ class AskRequest(BaseModel):
     question: str
     session_id: str
     top_k: int = 10
+    scope_keys: list[str] = Field(default_factory=lambda: ["global"])
 
 @app.get("/health")
 def health():
@@ -153,10 +189,16 @@ def metrics():
 # Semantic Cache
 # ---------------------------
 
-async def check_semantic_cache(question):
-    cached = redis_client.get(build_rag_cache_key(question))
+async def check_semantic_cache(question, scope_keys):
+    cache_key = build_rag_cache_key(question, scope_keys)
+    cached = await redis_client.get(cache_key)
 
     if cached:
+        if is_negative_or_empty_answer(cached):
+            logging.info({"event": "rag_cache_negative_ignored"})
+            await redis_client.delete(cache_key)
+            return None
+
         logging.info({"event": "rag_cache_hit"})
         return cached
 
@@ -164,9 +206,13 @@ async def check_semantic_cache(question):
     return None
 
 
-async def save_semantic_cache(question, answer):
-    redis_client.setex(
-        build_rag_cache_key(question),
+async def save_semantic_cache(question, answer, scope_keys):
+    if is_negative_or_empty_answer(answer):
+        logging.info({"event": "rag_cache_negative_skipped"})
+        return
+
+    await redis_client.setex(
+        build_rag_cache_key(question, scope_keys),
         RAG_CACHE_TTL,
         answer
     )
@@ -236,20 +282,21 @@ def trim_context(contexts):
 
 async def parallel_embeddings(answer, contexts):
 
-    answer_task = client.post(
-        f"{VECTOR_SERVICE_URL}/embed",
-        json={"texts": [answer]}
-    )
+    async with vector_semaphore:
+        answer_task = client.post(
+            f"{VECTOR_SERVICE_URL}/embed",
+            json={"texts": [answer]}
+        )
 
-    context_task = client.post(
-        f"{VECTOR_SERVICE_URL}/embed",
-        json={"texts": contexts}
-    )
+        context_task = client.post(
+            f"{VECTOR_SERVICE_URL}/embed",
+            json={"texts": contexts}
+        )
 
-    answer_resp, context_resp = await asyncio.gather(
-        answer_task,
-        context_task
-    )
+        answer_resp, context_resp = await asyncio.gather(
+            answer_task,
+            context_task
+        )
 
     answer_vector = answer_resp.json()["embeddings"][0]
     context_vectors = context_resp.json()["embeddings"]
@@ -279,14 +326,16 @@ async def compress_documents(docs, question):
 Верни сокращённую версию текста.
 """
 
-    resp = await client.post(
-        LLM_SERVICE_URL,
-        json={
-            "prompt": prompt,
-            "model": FAST_MODEL,
-            "temperature": 0
-        }
-    )
+    async with llm_semaphore:
+        resp = await client.post(
+            LLM_SERVICE_URL,
+            json={
+                "prompt": prompt,
+                "model": FAST_MODEL,
+                "temperature": 0,
+                "max_tokens": 512
+            }
+        )
 
     data = resp.json()
     text = data.get("response")
@@ -333,7 +382,7 @@ async def generate_search_queries(question):
 # Multi vector search
 # ---------------------------
 
-async def multi_vector_search(queries, top_k):
+async def multi_vector_search(queries, top_k, scope_keys):
 
     tasks = []
 
@@ -344,13 +393,15 @@ async def multi_vector_search(queries, top_k):
                 f"{VECTOR_SERVICE_URL}/search",
                 json={
                     "query": q,
-                    "top_k": top_k
+                    "top_k": top_k,
+                    "scope_keys": scope_keys
                 }
             )
         )
 
     try:
-        responses = await asyncio.gather(*tasks)
+        async with vector_semaphore:
+            responses = await asyncio.gather(*tasks)
     except httpx.HTTPError as exc:
         logging.warning({"event": "vector_search_unavailable", "error": str(exc)})
         raise HTTPException(
@@ -388,7 +439,8 @@ async def ask(req: AskRequest):
         # Semantic Cache
         # ---------------------------
 
-        cached_answer = await check_semantic_cache(req.question)
+        scope_keys = sorted(set(req.scope_keys or ["global"]))
+        cached_answer = await check_semantic_cache(req.question, scope_keys)
 
         if cached_answer:
 
@@ -428,7 +480,7 @@ async def ask(req: AskRequest):
         # Session memory
         # ---------------------------
 
-        history = get_history(req.session_id)
+        history = await get_history(req.session_id)
 
         history = history[-MAX_HISTORY_MESSAGES:]
 
@@ -444,7 +496,8 @@ async def ask(req: AskRequest):
 
             search_results = await multi_vector_search(
                 queries,
-                max(top_k, RAG_SEARCH_CANDIDATES)
+                max(top_k, RAG_SEARCH_CANDIDATES),
+                scope_keys
             )
             search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
 
@@ -572,15 +625,16 @@ async def ask(req: AskRequest):
 
         with LLM_LATENCY.time():
 
-            llm_response = await client.post(
-                LLM_SERVICE_URL,
-                json={
-                    "prompt": prompt,
-                    "model": REASON_MODEL,
-                    "temperature": 0,
-                    "max_tokens": 1024
-                }
-            )
+            async with llm_semaphore:
+                llm_response = await client.post(
+                    LLM_SERVICE_URL,
+                    json={
+                        "prompt": prompt,
+                        "model": REASON_MODEL,
+                        "temperature": 0,
+                        "max_tokens": RAG_MAX_ANSWER_TOKENS
+                    }
+                )
 
         llm_response.raise_for_status()
 
@@ -598,15 +652,16 @@ async def ask(req: AskRequest):
 
         logging.info({"event": "fallback_model_triggered"})
 
-        fallback_resp = await client.post(
-            LLM_SERVICE_URL,
-            json={
-                "prompt": prompt,
-                "model": REASON_MODEL,
-                "temperature": 0,
-                "max_tokens": 1024
-            }
-        )
+        async with llm_semaphore:
+            fallback_resp = await client.post(
+                LLM_SERVICE_URL,
+                json={
+                    "prompt": prompt,
+                    "model": FINAL_MODEL,
+                    "temperature": 0,
+                    "max_tokens": RAG_MAX_ANSWER_TOKENS
+                }
+            )
 
         fallback_data = fallback_resp.json()
         answer = fallback_data.get("response", "")
@@ -664,13 +719,13 @@ async def ask(req: AskRequest):
     history.append({"role": "user", "text": req.question})
     history.append({"role": "assistant", "text": answer})
 
-    save_history(req.session_id, history)
+    await save_history(req.session_id, history)
 
     # ---------------------------
     # Save semantic cache
     # ---------------------------
 
-    await save_semantic_cache(req.question, answer)
+    await save_semantic_cache(req.question, answer, scope_keys)
 
     return {
         "answer": answer,

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import requests
 import hashlib
 import re
@@ -90,7 +90,12 @@ def chunk_text(text, chunk_size=800, overlap=100):
 
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    scope_key: str = Form("global"),
+    owner_username: str | None = Form(None),
+    knowledge_base: str = Form("global")
+):
 
     # 1️⃣ Читаем файл полностью
     file_bytes = await file.read()
@@ -136,7 +141,10 @@ async def upload_file(file: UploadFile = File(...)):
             json={
                 "texts": chunks,
                 "document_id": file_hash,
-                "filename": file.filename
+                "filename": file.filename,
+                "scope_key": scope_key,
+                "owner_username": owner_username,
+                "knowledge_base": knowledge_base
             },
             timeout=REQUEST_TIMEOUT
         )
@@ -158,5 +166,8 @@ async def upload_file(file: UploadFile = File(...)):
     return {
         "status": "indexed",
         "document_id": file_hash,
-        "chunks": len(chunks)
+        "chunks": len(chunks),
+        "scope_key": scope_key,
+        "knowledge_base": knowledge_base,
+        "owner_username": owner_username
     }

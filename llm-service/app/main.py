@@ -13,9 +13,12 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434/api/generate")
 PRIMARY_MODEL = os.getenv("LLM_MODEL", "mistral:latest")
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "llama3:8b")
 
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))
 RETRY_COUNT = int(os.getenv("RETRY_COUNT", "3"))
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "4"))
+LLM_HTTP_MAX_CONNECTIONS = int(os.getenv("LLM_HTTP_MAX_CONNECTIONS", "50"))
+LLM_HTTP_MAX_KEEPALIVE = int(os.getenv("LLM_HTTP_MAX_KEEPALIVE", "20"))
 
 
 # ---------- Redis (async) ----------
@@ -28,17 +31,26 @@ redis_client = redis.Redis(
 
 # ---------- HTTP Client ----------
 client: httpx.AsyncClient | None = None
+llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+cache_locks: dict[str, asyncio.Lock] = {}
 
 
 @app.on_event("startup")
 async def startup():
     global client
-    client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=5.0),
+        limits=httpx.Limits(
+            max_connections=LLM_HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=LLM_HTTP_MAX_KEEPALIVE
+        )
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await client.aclose()
+    await redis_client.aclose()
 
 
 # ---------- Request schema ----------
@@ -57,8 +69,8 @@ def health():
 
 
 # ---------- Cache key ----------
-def build_cache_key(prompt: str, model: str):
-    raw = f"{model}:{prompt}"
+def build_cache_key(prompt: str, model: str, temperature: float, max_tokens: int):
+    raw = f"{model}:{temperature}:{max_tokens}:{prompt}"
     return "llm:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -105,7 +117,7 @@ async def generate(req: LLMRequest):
 
     model = req.model or PRIMARY_MODEL
 
-    cache_key = build_cache_key(req.prompt, model)
+    cache_key = build_cache_key(req.prompt, model, req.temperature, req.max_tokens)
 
     # -------- Cache check --------
     cached = await redis_client.get(cache_key)
@@ -117,29 +129,37 @@ async def generate(req: LLMRequest):
             "model": model
         }
 
-    payload = {
-        "prompt": req.prompt,
-        "model": model,
-        "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
-        "options": {
-            "temperature": req.temperature,
-            "num_predict": req.max_tokens
+    lock = cache_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        cached = await redis_client.get(cache_key)
+        if cached:
+            return {
+                "response": cached,
+                "cached": True,
+                "model": model
+            }
+
+        payload = {
+            "prompt": req.prompt,
+            "model": model,
+            "stream": False,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": req.temperature,
+                "num_predict": req.max_tokens
+            }
         }
-    }
 
-    try:
+        try:
+            async with llm_semaphore:
+                response = await generate_with_fallback(payload, model)
+        except Exception as e:
+            return {"error": str(e)}
 
-        response = await generate_with_fallback(payload, model)
+        answer = response.json().get("response", "")
 
-    except Exception as e:
-
-        return {"error": str(e)}
-
-    answer = response.json().get("response", "")
-
-    # -------- Save cache --------
-    await redis_client.setex(cache_key, 600, answer)
+        # -------- Save cache --------
+        await redis_client.setex(cache_key, 600, answer)
 
     return {
         "response": answer,

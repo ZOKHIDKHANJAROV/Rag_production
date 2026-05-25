@@ -3,8 +3,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-import requests
+import httpx
 import logging
 import os
 import uuid
@@ -15,6 +16,7 @@ import hmac
 import base64
 import time
 import binascii
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
@@ -85,8 +87,10 @@ MAX_FILE_SIZE = int(
 ) * 1024 * 1024
 
 REQUEST_TIMEOUT = int(
-    os.getenv("REQUEST_TIMEOUT", "300")
+    os.getenv("REQUEST_TIMEOUT", "60")
 )
+UI_HTTP_MAX_CONNECTIONS = int(os.getenv("UI_HTTP_MAX_CONNECTIONS", "200"))
+UI_HTTP_MAX_KEEPALIVE = int(os.getenv("UI_HTTP_MAX_KEEPALIVE", "50"))
 
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 JWT_ALGORITHM = "HS256"
@@ -111,8 +115,8 @@ ROLE_USER = "user"
 KNOWN_ROLES = {ROLE_ADMIN, ROLE_USER}
 
 ROLE_LABELS = {
-    ROLE_ADMIN: "Admin",
-    ROLE_USER: "User",
+    ROLE_ADMIN: "Админ",
+    ROLE_USER: "Пользователь",
 }
 
 ROLE_PERMISSIONS = {
@@ -120,6 +124,8 @@ ROLE_PERMISSIONS = {
         "view_all_sessions",
         "delete_any_session",
         "view_all_documents",
+        "manage_documents",
+        "manage_users",
         "view_services",
     },
     ROLE_USER: {
@@ -128,6 +134,17 @@ ROLE_PERMISSIONS = {
         "view_own_documents",
     },
 }
+
+
+class AdminUserUpdate(BaseModel):
+    password: str | None = None
+    role: str | None = None
+
+
+class AdminUserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = ROLE_USER
 
 
 def normalize_role(role: str) -> str:
@@ -187,6 +204,26 @@ SERVICES = {
     "llm": os.getenv("LLM_SERVICE_URL", "http://llm-service:8002"),
     "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333")
 }
+
+http_client: httpx.AsyncClient | None = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global http_client
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=5.0),
+        limits=httpx.Limits(
+            max_connections=UI_HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=UI_HTTP_MAX_KEEPALIVE
+        )
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if http_client:
+        await http_client.aclose()
 
 # =========================
 # AUTH
@@ -428,6 +465,26 @@ def rag_session_id(username: str, session_id: str):
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def user_scope_key(username: str) -> str:
+    return f"user:{username}"
+
+
+def request_scope_keys(user: Dict) -> List[str]:
+    return ["global", user_scope_key(user["username"])]
+
+
+def validate_scope_access(user: Dict, scope_key: str):
+    scope = (scope_key or "global").strip() or "global"
+
+    if is_admin(user):
+        return scope
+
+    if scope != user_scope_key(user["username"]):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return scope
+
+
 def validate_registration(username: str, password: str):
     username = username.strip()
 
@@ -583,10 +640,10 @@ def me(request: Request):
 # =========================
 
 @app.get("/health")
-def health():
+async def health():
     """Check overall system health"""
     try:
-        rag_health = requests.get(
+        rag_health = await http_client.get(
             SERVICES["rag"] + "/health",
             timeout=5
         )
@@ -598,7 +655,7 @@ def health():
             "timestamp": datetime.now().isoformat()
         }
 
-    except Exception as e:
+    except (httpx.HTTPError, RuntimeError) as e:
         logger.error(f"Health check failed: {str(e)}")
         raise HTTPException(
             status_code=503,
@@ -607,29 +664,34 @@ def health():
 
 
 @app.get("/api/services-status")
-def services_status(request: Request):
+async def services_status(request: Request):
     """Get status of all backend services"""
     user = get_current_user(request)
     require_permission(user, "view_services")
     status = {}
     
-    for service_name, service_url in SERVICES.items():
+    async def check_service(service_name: str, service_url: str):
         try:
-            response = requests.get(
+            response = await http_client.get(
                 f"{service_url}/health",
                 timeout=3
             )
-            status[service_name] = {
+            return service_name, {
                 "status": "healthy" if response.status_code == 200 else "offline",
                 "url": service_url
             }
         except Exception as e:
             logger.warning(f"Service {service_name} health check failed: {str(e)}")
-            status[service_name] = {
+            return service_name, {
                 "status": "offline",
                 "error": str(e),
                 "url": service_url
             }
+
+    checks = await asyncio.gather(
+        *(check_service(name, url) for name, url in SERVICES.items())
+    )
+    status = dict(checks)
     
     return {"services": status, "timestamp": datetime.now().isoformat()}
 
@@ -638,7 +700,7 @@ def services_status(request: Request):
 # =========================
 
 @app.post("/ask")
-def ask(
+async def ask(
     request: Request,
     question: str = Form(...),
     session_id: str = Form(None)
@@ -675,10 +737,11 @@ def ask(
         payload = {
             "question": question,
             "session_id": rag_session_id(user["username"], session_id),
-            "top_k": 5
+            "top_k": 5,
+            "scope_keys": request_scope_keys(user)
         }
 
-        response = requests.post(
+        response = await http_client.post(
             RAG_URL,
             json=payload,
             timeout=REQUEST_TIMEOUT
@@ -711,7 +774,7 @@ def ask(
             "timestamp": datetime.now().isoformat()
         })
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(f"RAG service error: {str(e)}")
         raise HTTPException(
             status_code=502,
@@ -736,7 +799,12 @@ def ask(
 # =========================
 
 @app.post("/upload")
-def upload(request: Request, file: UploadFile = File(...), session_id: str = Form(None)):
+async def upload(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: str = Form(None),
+    scope_key: str = Form(None)
+):
     """Upload a document to the RAG system"""
     try:
         user = get_current_user(request)
@@ -749,7 +817,7 @@ def upload(request: Request, file: UploadFile = File(...), session_id: str = For
 
         logger.info(f"Uploading file: {file.filename} | user={user['username']}")
 
-        file_bytes = file.file.read()
+        file_bytes = await file.read()
 
         if len(file_bytes) > MAX_FILE_SIZE:
             logger.warning(
@@ -760,6 +828,11 @@ def upload(request: Request, file: UploadFile = File(...), session_id: str = For
                 detail=f"File too large (max {MAX_FILE_SIZE / 1024 / 1024}MB)"
             )
 
+        selected_scope = scope_key or user_scope_key(user["username"])
+        selected_scope = validate_scope_access(user, selected_scope)
+        knowledge_base = "global" if selected_scope == "global" else "personal"
+        owner_username = None if selected_scope == "global" else selected_scope.replace("user:", "", 1)
+
         files = {
             "file": (
                 file.filename,
@@ -767,10 +840,16 @@ def upload(request: Request, file: UploadFile = File(...), session_id: str = For
                 file.content_type
             )
         }
+        data = {
+            "scope_key": selected_scope,
+            "knowledge_base": knowledge_base,
+            "owner_username": owner_username or ""
+        }
 
-        response = requests.post(
+        response = await http_client.post(
             INGEST_URL,
             files=files,
+            data=data,
             timeout=REQUEST_TIMEOUT
         )
 
@@ -782,6 +861,9 @@ def upload(request: Request, file: UploadFile = File(...), session_id: str = For
             "filename": file.filename,
             "document_id": result.get("document_id"),
             "chunks": result.get("chunks"),
+            "scope_key": result.get("scope_key", selected_scope),
+            "knowledge_base": result.get("knowledge_base", knowledge_base),
+            "owner_username": result.get("owner_username", owner_username),
             "timestamp": datetime.now().isoformat(),
             "size": len(file_bytes)
         }
@@ -803,7 +885,7 @@ def upload(request: Request, file: UploadFile = File(...), session_id: str = For
             "timestamp": datetime.now().isoformat()
         })
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(
             f"Ingestion service error: {str(e)}"
         )
@@ -830,20 +912,17 @@ def upload(request: Request, file: UploadFile = File(...), session_id: str = For
 # =========================
 
 @app.get("/api/documents")
-def documents(request: Request):
+async def documents(request: Request):
     """Get list of uploaded documents"""
     try:
         user = get_current_user(request)
         logger.debug("Fetching documents")
 
-        if not has_permission(user, "view_all_documents"):
-            return {
-                "documents": user_documents.get(user["username"], []),
-                "timestamp": datetime.now().isoformat()
-            }
+        params = {"all_scopes": "true"} if has_permission(user, "view_all_documents") else {"owner_username": user["username"]}
 
-        resp = requests.get(
+        resp = await http_client.get(
             f"{EMBED_URL}/documents",
+            params=params,
             timeout=REQUEST_TIMEOUT
         )
 
@@ -855,7 +934,7 @@ def documents(request: Request):
             "timestamp": datetime.now().isoformat()
         }
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error(
             f"Embedding service error: {str(e)}"
         )
@@ -968,6 +1047,194 @@ def list_sessions(request: Request):
 
 
 # =========================
+# ADMIN
+# =========================
+
+@app.get("/api/admin/users")
+def admin_list_users(request: Request):
+    user = get_current_user(request)
+    require_permission(user, "manage_users")
+
+    return {
+        "users": [
+            {
+                **serialize_user(username, data),
+                "sessions": sum(1 for session in sessions.values() if session.get("username") == username),
+                "documents": len(user_documents.get(username, [])),
+            }
+            for username, data in sorted(USERS.items())
+        ],
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.post("/api/admin/users")
+def admin_create_user(request: Request, payload: AdminUserCreate):
+    user = get_current_user(request)
+    require_permission(user, "manage_users")
+
+    username = validate_registration(payload.username, payload.password)
+    USERS[username] = {
+        "password": payload.password,
+        "role": normalize_role(payload.role),
+    }
+    save_users()
+
+    return {
+        "user": serialize_user(username, USERS[username]),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.patch("/api/admin/users/{username}")
+def admin_update_user(request: Request, username: str, payload: AdminUserUpdate):
+    user = get_current_user(request)
+    require_permission(user, "manage_users")
+
+    if username not in USERS:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.password is not None:
+        if len(payload.password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        USERS[username]["password"] = payload.password
+
+    if payload.role is not None:
+        USERS[username]["role"] = normalize_role(payload.role)
+
+    save_users()
+
+    return {
+        "user": serialize_user(username, USERS[username]),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.delete("/api/admin/users/{username}")
+async def admin_delete_user(request: Request, username: str):
+    user = get_current_user(request)
+    require_permission(user, "manage_users")
+
+    if username == user["username"]:
+        raise HTTPException(status_code=400, detail="Admin cannot delete own account")
+
+    if username not in USERS:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    USERS.pop(username)
+    save_users()
+
+    for sid in [sid for sid, session in sessions.items() if session.get("username") == username]:
+        sessions.pop(sid, None)
+
+    user_documents.pop(username, None)
+    for token_id, token in list(refresh_tokens.items()):
+        if token.get("username") == username:
+            refresh_tokens.pop(token_id, None)
+
+    try:
+        await http_client.post(
+            f"{EMBED_URL}/scope/{user_scope_key(username)}/delete",
+            timeout=REQUEST_TIMEOUT
+        )
+    except httpx.HTTPError:
+        logger.warning("Failed to delete vector scope for user '%s'", username)
+
+    return {
+        "status": "deleted",
+        "username": username,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/api/admin/databases")
+async def admin_databases(request: Request):
+    user = get_current_user(request)
+    require_permission(user, "manage_documents")
+
+    resp = await http_client.get(
+        f"{EMBED_URL}/documents",
+        params={"all_scopes": "true"},
+        timeout=REQUEST_TIMEOUT
+    )
+    resp.raise_for_status()
+    documents = resp.json()
+    if not isinstance(documents, list):
+        documents = documents.get("documents", [])
+
+    counts = {"global": 0}
+    for username in USERS:
+        counts[user_scope_key(username)] = 0
+
+    for doc in documents:
+        scope = doc.get("scope_key") or "global"
+        counts[scope] = counts.get(scope, 0) + 1
+
+    return {
+        "databases": [
+            {
+                "scope_key": "global",
+                "name": "Основная база",
+                "type": "global",
+                "owner_username": None,
+                "documents": counts.get("global", 0),
+            },
+            *[
+                {
+                    "scope_key": user_scope_key(username),
+                    "name": f"Личная база: {username}",
+                    "type": "personal",
+                    "owner_username": username,
+                    "documents": counts.get(user_scope_key(username), 0),
+                }
+                for username in sorted(USERS)
+            ]
+        ],
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/api/admin/documents")
+async def admin_documents(request: Request, scope_key: str = None):
+    user = get_current_user(request)
+    require_permission(user, "manage_documents")
+
+    params = {"all_scopes": "true"} if not scope_key else {"scope_key": scope_key}
+    resp = await http_client.get(
+        f"{EMBED_URL}/documents",
+        params=params,
+        timeout=REQUEST_TIMEOUT
+    )
+    resp.raise_for_status()
+
+    docs = resp.json()
+    return {
+        "documents": docs if isinstance(docs, list) else docs.get("documents", []),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.delete("/api/admin/documents/{document_id}")
+async def admin_delete_document(request: Request, document_id: str, scope_key: str):
+    user = get_current_user(request)
+    require_permission(user, "manage_documents")
+
+    resp = await http_client.post(
+        f"{EMBED_URL}/documents/{document_id}/delete",
+        params={"scope_key": scope_key},
+        timeout=REQUEST_TIMEOUT
+    )
+    resp.raise_for_status()
+
+    return {
+        "status": "deleted",
+        "document_id": document_id,
+        "scope_key": scope_key,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+# =========================
 # MAIN PAGE
 # =========================
 
@@ -986,6 +1253,7 @@ def chat_page(request: Request):
                     "request": request,
                     "user": rotated["user"],
                     "can_view_services": has_permission(rotated["user"], "view_services"),
+                    "can_manage_admin": has_permission(rotated["user"], "manage_users"),
                 }
             )
             set_auth_cookies(response, rotated["access_token"], rotated["refresh_token"])
@@ -1007,5 +1275,6 @@ def chat_page(request: Request):
             "request": request,
             "user": user,
             "can_view_services": has_permission(user, "view_services"),
+            "can_manage_admin": has_permission(user, "manage_users"),
         }
     )
