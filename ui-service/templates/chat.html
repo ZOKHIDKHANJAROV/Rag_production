@@ -463,7 +463,7 @@
                 formData.append('question', question);
                 formData.append('session_id', currentSessionId);
 
-                const response = await apiFetch(`${API_BASE}/ask`, {
+                const response = await apiFetch(`${API_BASE}/ask/stream`, {
                     method: 'POST',
                     body: formData
                 });
@@ -472,19 +472,59 @@
                     throw new Error('Failed to get answer');
                 }
 
-                const data = await response.json();
-
-                chatMessages.push({
+                const answerMessage = {
                     type: 'answer',
-                    content: data.answer,
-                    sources: data.sources || [],
+                    content: '',
+                    sources: [],
                     timestamp: new Date().toISOString()
-                });
+                };
+
+                chatMessages.push(answerMessage);
+                renderChat();
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+
+                        const event = JSON.parse(line);
+
+                        if (event.type === 'session' && event.session_id) {
+                            currentSessionId = event.session_id;
+                        } else if (event.type === 'sources') {
+                            answerMessage.sources = event.sources || [];
+                        } else if (event.type === 'delta') {
+                            answerMessage.content += event.text || '';
+                            renderChat();
+                        } else if (event.type === 'done') {
+                            answerMessage.sources = event.sources || answerMessage.sources || [];
+                        } else if (event.type === 'error') {
+                            throw new Error(event.error || 'Streaming answer failed');
+                        }
+                    }
+                }
+
+                if (buffer.trim()) {
+                    const event = JSON.parse(buffer);
+                    if (event.type === 'done') {
+                        answerMessage.sources = event.sources || answerMessage.sources || [];
+                    }
+                }
 
                 renderChat();
 
-                if (data.sources && data.sources.length > 0) {
-                    showSources(data.sources);
+                if (answerMessage.sources && answerMessage.sources.length > 0) {
+                    showSources(answerMessage.sources);
                 }
             } catch (error) {
                 console.error('Ошибка:', error);

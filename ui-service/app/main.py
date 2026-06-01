@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Response, Form, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -71,6 +71,7 @@ RAG_URL = os.getenv(
     "RAG_SERVICE_URL",
     "http://rag-service:8003/ask"
 )
+RAG_STREAM_URL = RAG_URL.replace("/ask", "/ask/stream")
 
 INGEST_URL = os.getenv(
     "INGESTION_SERVICE_URL",
@@ -787,6 +788,114 @@ async def ask(
     except Exception as e:
         logger.error(
             f"Ask failed: {str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error"
+        )
+
+
+@app.post("/ask/stream")
+async def ask_stream(
+    request: Request,
+    question: str = Form(...),
+    session_id: str = Form(None)
+):
+    """Ask a question and stream answer tokens from the RAG system."""
+    try:
+        user = get_current_user(request)
+
+        if not question.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Question cannot be empty"
+            )
+
+        if not session_id:
+            session_id = str(uuid.uuid4())
+
+        if session_id not in sessions:
+            sessions[session_id] = {
+                "username": user["username"],
+                "history": [],
+                "created": datetime.now().isoformat(),
+                "documents": []
+            }
+        else:
+            require_session_owner(session_id, user)
+
+        payload = {
+            "question": question,
+            "session_id": rag_session_id(user["username"], session_id),
+            "top_k": 5,
+            "scope_keys": request_scope_keys(user)
+        }
+
+        async def stream():
+            answer_parts = []
+            sources = []
+
+            yield json.dumps({
+                "type": "session",
+                "session_id": session_id,
+                "timestamp": datetime.now().isoformat()
+            }, ensure_ascii=False) + "\n"
+
+            async with http_client.stream(
+                "POST",
+                RAG_STREAM_URL,
+                json=payload,
+                timeout=REQUEST_TIMEOUT
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+
+                    data = json.loads(line)
+
+                    if data.get("type") == "delta":
+                        answer_parts.append(data.get("text", ""))
+
+                    if data.get("type") in {"sources", "done"}:
+                        sources = data.get("sources", sources)
+
+                    yield json.dumps(data, ensure_ascii=False) + "\n"
+
+            answer = "".join(answer_parts)
+
+            sessions[session_id]["history"].append({
+                "type": "question",
+                "content": question,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            sessions[session_id]["history"].append({
+                "type": "answer",
+                "content": answer,
+                "sources": sources,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            logger.info(f"Streaming answer generated | session={session_id}")
+
+        return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+    except httpx.HTTPError as e:
+        logger.error(f"RAG stream service error: {str(e)}")
+        raise HTTPException(
+            status_code=502,
+            detail="RAG service unavailable"
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            f"Streaming ask failed: {str(e)}",
             exc_info=True
         )
         raise HTTPException(

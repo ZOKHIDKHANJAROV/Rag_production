@@ -10,7 +10,7 @@ import re
 
 from fastapi import FastAPI
 from fastapi import HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from prometheus_client import Counter, Histogram, generate_latest
 
@@ -26,7 +26,7 @@ VECTOR_SERVICE_URL = os.getenv("VECTOR_SERVICE_URL", "http://embedding-service:8
 LLM_MODEL = os.getenv("LLM_MODEL", "mistral:latest")
 FAST_MODEL = os.getenv("FAST_MODEL", LLM_MODEL)
 MID_MODEL = os.getenv("MID_MODEL", LLM_MODEL)
-REASON_MODEL = os.getenv("REASON_MODEL", "llama3:8b-instruct-q8_0")
+REASON_MODEL = os.getenv("REASON_MODEL", "mistral:latest")
 FINAL_MODEL = os.getenv("FINAL_MODEL", LLM_MODEL)
 
 SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.25"))
@@ -731,3 +731,187 @@ async def ask(req: AskRequest):
         "answer": answer,
         "sources": reranked
     }
+
+
+@app.post("/ask/stream")
+async def ask_stream(req: AskRequest):
+
+    async def event(data):
+        return json.dumps(data, ensure_ascii=False) + "\n"
+
+    async def stream():
+        RAG_REQUESTS.inc()
+        started_at = asyncio.get_running_loop().time()
+
+        logging.info({
+            "event": "question_received",
+            "stream": True,
+            "question": req.question
+        })
+
+        scope_keys = sorted(set(req.scope_keys or ["global"]))
+        cached_answer = await check_semantic_cache(req.question, scope_keys)
+
+        if cached_answer:
+            yield await event({"type": "delta", "text": cached_answer, "cached": True})
+            yield await event({"type": "done", "sources": [], "cached": True})
+            RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
+            return
+
+        router, queries = await asyncio.gather(
+            route_question(req.question),
+            generate_search_queries(req.question)
+        )
+
+        top_k = max(1, min(int(router.get("top_k", req.top_k)), 10))
+        use_compression = bool(router.get("compression", RAG_ENABLE_COMPRESSION))
+
+        history = await get_history(req.session_id)
+        history = history[-MAX_HISTORY_MESSAGES:]
+        history_text = "\n".join(
+            [f"{h['role']}: {h['text']}" for h in history]
+        )
+
+        vector_started_at = asyncio.get_running_loop().time()
+        search_results = await multi_vector_search(
+            queries,
+            max(top_k, RAG_SEARCH_CANDIDATES),
+            scope_keys
+        )
+        VECTOR_LATENCY.observe(asyncio.get_running_loop().time() - vector_started_at)
+        search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
+
+        seen = set()
+        unique = []
+
+        for r in search_results:
+            doc_id = r.get("document_id") or r.get("id") or ""
+            chunk_key = (doc_id, r["text"][:200])
+
+            if chunk_key not in seen:
+                seen.add(chunk_key)
+                unique.append(r)
+
+        search_results = unique
+
+        for r in search_results:
+            r["keyword_score"] = keyword_score(req.question, r["text"])
+            r["hybrid_score"] = 0.7 * r["score"] + 0.3 * r["keyword_score"]
+
+        search_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
+
+        filtered = [
+            r for r in search_results
+            if r["score"] >= SCORE_THRESHOLD or r["hybrid_score"] >= SCORE_THRESHOLD
+        ][:RAG_SEARCH_CANDIDATES]
+
+        if not filtered:
+            answer = "В базе знаний нет информации по данному вопросу."
+            yield await event({"type": "delta", "text": answer})
+            yield await event({"type": "done", "sources": []})
+            RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
+            return
+
+        reranked = await asyncio.to_thread(
+            rerank_documents,
+            req.question,
+            filtered
+        )
+        reranked = reranked[:RAG_FINAL_TOP_K]
+
+        contexts = [r["text"] for r in reranked]
+
+        if use_compression:
+            contexts = await compress_documents(contexts, req.question)
+
+        contexts = trim_context(contexts)
+
+        if not contexts:
+            answer = "Контекст отсутствует."
+            yield await event({"type": "delta", "text": answer})
+            yield await event({"type": "done", "sources": []})
+            RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
+            return
+
+        context_text = "\n\n".join(contexts)
+        language_instruction = response_language_instruction(req.question)
+        prompt = f"""
+Ты корпоративный AI ассистент.
+{language_instruction}
+Используй только контекст ниже и историю диалога, если она помогает понять вопрос.
+Если в контексте нет ответа, прямо скажи, что в базе знаний нет такой информации.
+Не выдумывай факты, номера, даты и имена.
+Отвечай кратко, но полно.
+
+История диалога:
+{history_text}
+
+Контекст:
+{context_text}
+
+Вопрос:
+{req.question}
+
+Ответ:
+"""
+
+        yield await event({"type": "sources", "sources": reranked})
+
+        answer_chunks = []
+        llm_started_at = asyncio.get_running_loop().time()
+
+        async with llm_semaphore:
+            async with client.stream(
+                "POST",
+                LLM_SERVICE_URL,
+                json={
+                    "prompt": prompt,
+                    "model": REASON_MODEL,
+                    "temperature": 0,
+                    "max_tokens": RAG_MAX_ANSWER_TOKENS,
+                    "stream": True
+                }
+            ) as llm_response:
+                llm_response.raise_for_status()
+
+                async for line in llm_response.aiter_lines():
+                    if not line:
+                        continue
+
+                    data = json.loads(line)
+
+                    if data.get("type") == "error":
+                        yield await event({"type": "error", "error": data.get("error", "LLM error")})
+                        return
+
+                    token = data.get("text", "")
+                    if token:
+                        answer_chunks.append(token)
+                        yield await event({"type": "delta", "text": token})
+
+        LLM_LATENCY.observe(asyncio.get_running_loop().time() - llm_started_at)
+
+        answer = "".join(answer_chunks)
+
+        if not answer.strip():
+            yield await event({
+                "type": "delta",
+                "text": LLM_UNAVAILABLE_MESSAGE
+            })
+            yield await event({
+                "type": "done",
+                "sources": reranked,
+                "llm_unavailable": True
+            })
+            RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
+            return
+
+        history.append({"role": "user", "text": req.question})
+        history.append({"role": "assistant", "text": answer})
+        await save_history(req.session_id, history)
+        await save_semantic_cache(req.question, answer, scope_keys)
+
+        yield await event({"type": "done", "sources": reranked})
+        RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")

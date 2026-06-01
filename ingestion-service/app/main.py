@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import requests
+import httpx
 import hashlib
 import re
 from pypdf import PdfReader
@@ -11,6 +11,28 @@ app = FastAPI(title="Ingestion Service")
 
 VECTOR_SERVICE_URL = os.getenv("VECTOR_SERVICE_URL", "http://embedding-service:8001")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+HTTP_MAX_CONNECTIONS = int(os.getenv("INGESTION_HTTP_MAX_CONNECTIONS", "100"))
+HTTP_MAX_KEEPALIVE = int(os.getenv("INGESTION_HTTP_MAX_KEEPALIVE", "20"))
+
+http_client: httpx.AsyncClient | None = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global http_client
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=5.0),
+        limits=httpx.Limits(
+            max_connections=HTTP_MAX_CONNECTIONS,
+            max_keepalive_connections=HTTP_MAX_KEEPALIVE
+        )
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if http_client:
+        await http_client.aclose()
 
 
 @app.get("/health")
@@ -136,7 +158,7 @@ async def upload_file(
 
     # 5️⃣ Отправляем в embedding-service
     try:
-        response = requests.post(
+        response = await http_client.post(
             f"{VECTOR_SERVICE_URL}/index",
             json={
                 "texts": chunks,
@@ -149,15 +171,14 @@ async def upload_file(
             timeout=REQUEST_TIMEOUT
         )
 
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail={"error": "Vector service failed", "details": response.text}
-            )
+        response.raise_for_status()
 
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "Vector service failed", "details": e.response.text}
+        )
+    except httpx.HTTPError as e:
         raise HTTPException(
             status_code=503,
             detail=f"Vector service unreachable: {str(e)}"
