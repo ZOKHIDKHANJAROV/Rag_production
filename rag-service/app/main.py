@@ -836,7 +836,7 @@ async def ask_stream(req: AskRequest):
         context_text = "\n\n".join(contexts)
         language_instruction = response_language_instruction(req.question)
         prompt = f"""
-Ты корпоративный AI ассистент.
+Ты корпоративный AI ассистент АГМК.
 {language_instruction}
 Используй только контекст ниже и историю диалога, если она помогает понять вопрос.
 Если в контексте нет ответа, прямо скажи, что в базе знаний нет такой информации.

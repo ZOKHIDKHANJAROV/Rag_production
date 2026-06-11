@@ -27,16 +27,19 @@ services:
       - hf_cache:/root/.cache/huggingface
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_DISABLE_XET=1
     command:
-      - ${VLLM_HF_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      - ${VLLM_HF_MODEL:-AMead10/Llama-3.2-3B-Instruct-AWQ}
       - --served-model-name
-      - ${VLLM_SERVED_MODEL_NAME:-rag-model}
+      - ${VLLM_SERVED_MODEL_NAME:-llama3.2:3b-instruct}
       - --gpu-memory-utilization
       - ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       - --max-model-len
       - ${VLLM_MAX_MODEL_LEN:-4096}
       - --max-num-seqs
       - ${VLLM_MAX_NUM_SEQS:-16}
+      - --attention-backend
+      - FLASHINFER
       - --enforce-eager
       - --enable-prefix-caching
     gpus: all
@@ -87,7 +90,7 @@ services:
       - OLLAMA_KEEP_ALIVE=30m
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-service:8000/v1}
-      - VLLM_MODEL=${VLLM_MODEL:-rag-model}
+      - VLLM_MODEL=${VLLM_MODEL:-llama3.2:3b-instruct}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
       interval: 15s

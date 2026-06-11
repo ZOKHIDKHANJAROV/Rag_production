@@ -1,0 +1,196 @@
+services:
+
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  vllm-service:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8005:8000"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    command:
+      - ${VLLM_HF_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      - --served-model-name
+      - ${VLLM_SERVED_MODEL_NAME:-rag-model}
+      - --gpu-memory-utilization
+      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
+      - --max-model-len
+      - ${VLLM_MAX_MODEL_LEN:-4096}
+      - --max-num-seqs
+      - ${VLLM_MAX_NUM_SEQS:-16}
+      - --enforce-eager
+      - --enable-prefix-caching
+    gpus: all
+    ipc: host
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+    restart: unless-stopped
+
+  embedding-service:
+    build: ./embedding-service
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      - qdrant
+    environment:
+      - EMBEDDING_CONCURRENCY=4
+      - EMBEDDING_BATCH_SIZE=32
+      - EMBEDDING_WORKERS=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  llm-service:
+    build: ./llm-service
+    env_file:
+      - .env
+    ports:
+      - "8002:8002"
+    depends_on:
+      - redis
+      - vllm-service
+    environment:
+      - REQUEST_TIMEOUT=300
+      - LLM_CONCURRENCY=4
+      - LLM_WORKERS=1
+      - OLLAMA_KEEP_ALIVE=30m
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-service:8000/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-rag-model}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  rag-service:
+    build: ./rag-service
+    env_file:
+      - .env
+    ports:
+      - "8003:8003"
+    depends_on:
+      embedding-service:
+        condition: service_healthy
+      llm-service:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - LLM_SERVICE_URL=http://llm-service:8002/generate
+      - VECTOR_SERVICE_URL=http://embedding-service:8001
+      - REQUEST_TIMEOUT=60
+      - RAG_WORKERS=4
+      - RAG_LLM_CONCURRENCY=8
+      - RAG_VECTOR_CONCURRENCY=32
+      - RAG_CACHE_TTL=1800
+      - RAG_SEARCH_CANDIDATES=12
+      - RAG_FINAL_TOP_K=${RAG_FINAL_TOP_K:-3}
+      - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-2500}
+      - RAG_MAX_ANSWER_TOKENS=${RAG_MAX_ANSWER_TOKENS:-256}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  ingestion-service:
+    build: ./ingestion-service
+    env_file:
+      - .env
+    ports:
+      - "8004:8004"
+    depends_on:
+      embedding-service:
+        condition: service_healthy
+    environment:
+      - INGESTION_WORKERS=2
+      - INGESTION_HTTP_MAX_CONNECTIONS=100
+      - INGESTION_HTTP_MAX_KEEPALIVE=20
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  ui-service:
+    build: ./ui-service
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ui_data:/app/data
+    environment:
+      - REQUEST_TIMEOUT=60
+      - UI_WORKERS=1
+      - UI_HTTP_MAX_CONNECTIONS=200
+      - UI_HTTP_MAX_KEEPALIVE=50
+    depends_on:
+      rag-service:
+        condition: service_healthy
+      ingestion-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  hf_cache:
+  ui_data:

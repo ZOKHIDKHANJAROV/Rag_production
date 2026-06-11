@@ -1,1 +1,1 @@
-{"schema":{"is_deleted":"keyword","scope_key":"keyword","knowledge_base":"keyword","document_id":"keyword","owner_username":"keyword"}}
+{"schema":{"scope_key":"keyword","knowledge_base":"keyword","owner_username":"keyword","is_deleted":"keyword","document_id":"keyword"}}
