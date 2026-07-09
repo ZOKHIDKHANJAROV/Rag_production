@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import httpx
 import redis.asyncio as redis
@@ -24,6 +24,8 @@ OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "4"))
 LLM_HTTP_MAX_CONNECTIONS = int(os.getenv("LLM_HTTP_MAX_CONNECTIONS", "50"))
 LLM_HTTP_MAX_KEEPALIVE = int(os.getenv("LLM_HTTP_MAX_KEEPALIVE", "20"))
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+SERVICE_AUTH_HEADER = "X-Service-Token"
 
 
 # ---------- Redis (async) ----------
@@ -38,6 +40,27 @@ redis_client = redis.Redis(
 client: httpx.AsyncClient | None = None
 llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
 cache_locks: dict[str, asyncio.Lock] = {}
+
+
+@app.middleware("http")
+async def require_service_token(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    if not INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Internal service token is not configured"},
+        )
+
+    provided_token = request.headers.get(SERVICE_AUTH_HEADER, "")
+    if provided_token != INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid internal service token"},
+        )
+
+    return await call_next(request)
 
 
 @app.on_event("startup")

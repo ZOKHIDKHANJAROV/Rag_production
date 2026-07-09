@@ -2,8 +2,6 @@ services:
 
   qdrant:
     image: qdrant/qdrant
-    ports:
-      - "6333:6333"
     volumes:
       - ./qdrant_data:/qdrant/storage
     environment:
@@ -13,16 +11,28 @@ services:
   redis:
     image: redis:7
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
 
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rag_ui}
+      POSTGRES_USER: ${POSTGRES_USER:-rag_ui}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag_ui} -d ${POSTGRES_DB:-rag_ui}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
   vllm-service:
-    image: vllm/vllm-openai:latest
-    ports:
-      - "8005:8000"
+    image: vllm/vllm-openai:v0.6.6.post1
     volumes:
       - hf_cache:/root/.cache/huggingface
     environment:
@@ -56,8 +66,6 @@ services:
     build: ./embedding-service
     env_file:
       - .env
-    ports:
-      - "8001:8001"
     volumes:
       - hf_cache:/root/.cache/huggingface
     depends_on:
@@ -66,6 +74,7 @@ services:
       - EMBEDDING_CONCURRENCY=4
       - EMBEDDING_BATCH_SIZE=32
       - EMBEDDING_WORKERS=1
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
       interval: 15s
@@ -78,8 +87,6 @@ services:
     build: ./llm-service
     env_file:
       - .env
-    ports:
-      - "8002:8002"
     depends_on:
       - redis
       - vllm-service
@@ -91,6 +98,7 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm-service:8000/v1}
       - VLLM_MODEL=${VLLM_MODEL:-llama3.2:3b-instruct}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
       interval: 15s
@@ -103,8 +111,6 @@ services:
     build: ./rag-service
     env_file:
       - .env
-    ports:
-      - "8003:8003"
     depends_on:
       embedding-service:
         condition: service_healthy
@@ -124,6 +130,7 @@ services:
       - RAG_FINAL_TOP_K=${RAG_FINAL_TOP_K:-3}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-2500}
       - RAG_MAX_ANSWER_TOKENS=${RAG_MAX_ANSWER_TOKENS:-256}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
       interval: 15s
@@ -136,8 +143,6 @@ services:
     build: ./ingestion-service
     env_file:
       - .env
-    ports:
-      - "8004:8004"
     depends_on:
       embedding-service:
         condition: service_healthy
@@ -145,6 +150,7 @@ services:
       - INGESTION_WORKERS=2
       - INGESTION_HTTP_MAX_CONNECTIONS=100
       - INGESTION_HTTP_MAX_KEEPALIVE=20
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]
       interval: 15s
@@ -166,10 +172,13 @@ services:
       - UI_WORKERS=1
       - UI_HTTP_MAX_CONNECTIONS=200
       - UI_HTTP_MAX_KEEPALIVE=50
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     depends_on:
       rag-service:
         condition: service_healthy
       ingestion-service:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
@@ -182,7 +191,7 @@ services:
   prometheus:
     image: prom/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     restart: unless-stopped
@@ -190,10 +199,11 @@ services:
   grafana:
     image: grafana/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
 volumes:
   redis_data:
+  postgres_data:
   hf_cache:
   ui_data:
