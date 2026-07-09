@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import JSONResponse
 import httpx
 import hashlib
 import re
@@ -13,8 +14,35 @@ VECTOR_SERVICE_URL = os.getenv("VECTOR_SERVICE_URL", "http://embedding-service:8
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 HTTP_MAX_CONNECTIONS = int(os.getenv("INGESTION_HTTP_MAX_CONNECTIONS", "100"))
 HTTP_MAX_KEEPALIVE = int(os.getenv("INGESTION_HTTP_MAX_KEEPALIVE", "20"))
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+SERVICE_AUTH_HEADER = "X-Service-Token"
 
 http_client: httpx.AsyncClient | None = None
+
+
+def service_headers():
+    return {SERVICE_AUTH_HEADER: INTERNAL_SERVICE_TOKEN} if INTERNAL_SERVICE_TOKEN else {}
+
+
+@app.middleware("http")
+async def require_service_token(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    if not INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Internal service token is not configured"},
+        )
+
+    provided_token = request.headers.get(SERVICE_AUTH_HEADER, "")
+    if provided_token != INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid internal service token"},
+        )
+
+    return await call_next(request)
 
 
 @app.on_event("startup")
@@ -123,7 +151,7 @@ async def upload_file(
     file_bytes = await file.read()
 
     if not file_bytes:
-        return {"error": "Empty file"}
+        raise HTTPException(status_code=400, detail="Empty file")
 
     # 2️⃣ Hash документа (детерминированный ID)
     file_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -142,19 +170,21 @@ async def upload_file(
             text = file_bytes.decode("utf-8", errors="ignore")
 
         else:
-            return {"error": "Unsupported file type"}
+            raise HTTPException(status_code=415, detail="Unsupported file type")
 
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"error": f"Text extraction failed: {str(e)}"}
+        raise HTTPException(status_code=422, detail=f"Text extraction failed: {str(e)}")
 
     if not text.strip():
-        return {"error": "No text extracted from file"}
+        raise HTTPException(status_code=422, detail="No text extracted from file")
 
     # 4️⃣ Chunking
     chunks = chunk_text(text)
 
     if not chunks:
-        return {"error": "No chunks generated"}
+        raise HTTPException(status_code=422, detail="No chunks generated")
 
     # 5️⃣ Отправляем в embedding-service
     try:
@@ -168,6 +198,7 @@ async def upload_file(
                 "owner_username": owner_username,
                 "knowledge_base": knowledge_base
             },
+            headers=service_headers(),
             timeout=REQUEST_TIMEOUT
         )
 

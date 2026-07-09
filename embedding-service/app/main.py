@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import uuid
@@ -18,7 +19,30 @@ from app.qdrant_client import client, init_collection, collection_exists, COLLEC
 
 app = FastAPI(title="Vector Service")
 EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "4"))
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+SERVICE_AUTH_HEADER = "X-Service-Token"
 embedding_semaphore = asyncio.Semaphore(EMBEDDING_CONCURRENCY)
+
+
+@app.middleware("http")
+async def require_service_token(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    if not INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Internal service token is not configured"},
+        )
+
+    provided_token = request.headers.get(SERVICE_AUTH_HEADER, "")
+    if provided_token != INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid internal service token"},
+        )
+
+    return await call_next(request)
 
 
 async def embed_texts_async(texts: List[str]):

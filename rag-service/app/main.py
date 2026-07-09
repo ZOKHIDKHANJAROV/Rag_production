@@ -8,9 +8,8 @@ import json
 import hashlib
 import re
 
-from fastapi import FastAPI
-from fastapi import HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from prometheus_client import Counter, Histogram, generate_latest
 
@@ -49,6 +48,8 @@ RAG_HTTP_MAX_KEEPALIVE = int(os.getenv("RAG_HTTP_MAX_KEEPALIVE", "50"))
 RAG_LLM_CONCURRENCY = int(os.getenv("RAG_LLM_CONCURRENCY", "8"))
 RAG_VECTOR_CONCURRENCY = int(os.getenv("RAG_VECTOR_CONCURRENCY", "32"))
 RAG_MAX_ANSWER_TOKENS = int(os.getenv("RAG_MAX_ANSWER_TOKENS", "512"))
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+SERVICE_AUTH_HEADER = "X-Service-Token"
 LLM_UNAVAILABLE_MESSAGE = (
     "LLM service is unavailable or the requested Ollama model is not installed. "
     "Relevant sources were found, but generation cannot be completed yet."
@@ -126,6 +127,31 @@ client = httpx.AsyncClient(
         max_keepalive_connections=RAG_HTTP_MAX_KEEPALIVE
     )
 )
+
+
+def service_headers():
+    return {SERVICE_AUTH_HEADER: INTERNAL_SERVICE_TOKEN} if INTERNAL_SERVICE_TOKEN else {}
+
+
+@app.middleware("http")
+async def require_service_token(request: Request, call_next):
+    if request.url.path in {"/health", "/metrics"}:
+        return await call_next(request)
+
+    if not INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Internal service token is not configured"},
+        )
+
+    provided_token = request.headers.get(SERVICE_AUTH_HEADER, "")
+    if provided_token != INTERNAL_SERVICE_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid internal service token"},
+        )
+
+    return await call_next(request)
 llm_semaphore = asyncio.Semaphore(RAG_LLM_CONCURRENCY)
 vector_semaphore = asyncio.Semaphore(RAG_VECTOR_CONCURRENCY)
 
@@ -285,12 +311,14 @@ async def parallel_embeddings(answer, contexts):
     async with vector_semaphore:
         answer_task = client.post(
             f"{VECTOR_SERVICE_URL}/embed",
-            json={"texts": [answer]}
+            json={"texts": [answer]},
+            headers=service_headers()
         )
 
         context_task = client.post(
             f"{VECTOR_SERVICE_URL}/embed",
-            json={"texts": contexts}
+            json={"texts": contexts},
+            headers=service_headers()
         )
 
         answer_resp, context_resp = await asyncio.gather(
@@ -334,7 +362,8 @@ async def compress_documents(docs, question):
                 "model": FAST_MODEL,
                 "temperature": 0,
                 "max_tokens": 512
-            }
+            },
+            headers=service_headers()
         )
 
     data = resp.json()
@@ -395,7 +424,8 @@ async def multi_vector_search(queries, top_k, scope_keys):
                     "query": q,
                     "top_k": top_k,
                     "scope_keys": scope_keys
-                }
+                },
+                headers=service_headers()
             )
         )
 
@@ -633,7 +663,8 @@ async def ask(req: AskRequest):
                         "model": REASON_MODEL,
                         "temperature": 0,
                         "max_tokens": RAG_MAX_ANSWER_TOKENS
-                    }
+                    },
+                    headers=service_headers()
                 )
 
         llm_response.raise_for_status()
@@ -660,7 +691,8 @@ async def ask(req: AskRequest):
                     "model": FINAL_MODEL,
                     "temperature": 0,
                     "max_tokens": RAG_MAX_ANSWER_TOKENS
-                }
+                },
+                headers=service_headers()
             )
 
         fallback_data = fallback_resp.json()
@@ -870,7 +902,8 @@ async def ask_stream(req: AskRequest):
                     "temperature": 0,
                     "max_tokens": RAG_MAX_ANSWER_TOKENS,
                     "stream": True
-                }
+                },
+                headers=service_headers()
             ) as llm_response:
                 llm_response.raise_for_status()
 
