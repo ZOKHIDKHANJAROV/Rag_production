@@ -623,10 +623,27 @@ async def load_visible_sessions(user: Dict):
         session = await load_session_state(session_id)
         if not session:
             await store.srem(all_sessions_key(), session_id)
+            if not is_admin(user):
+                await store.srem(session_index_key(user["username"]), session_id)
             continue
         if is_admin(user) or session.get("username") == user["username"]:
             visible_sessions.append({"session_id": session_id, **session})
     return visible_sessions
+
+
+async def count_live_sessions_for_user(username: str):
+    store = ensure_redis_ready()
+    live_sessions = 0
+
+    for session_id in sorted(await store.smembers(session_index_key(username))):
+        session = await load_session_state(session_id)
+        if not session or session.get("username") != username:
+            await store.srem(session_index_key(username), session_id)
+            await store.srem(all_sessions_key(), session_id)
+            continue
+        live_sessions += 1
+
+    return live_sessions
 
 
 async def save_auth_session_state(auth_session_id: str, auth_session: Dict):
@@ -675,6 +692,10 @@ async def list_auth_sessions_for_user(username: str):
             continue
         sessions.append({"auth_session_id": auth_session_id, **auth_session})
     return sessions
+
+
+async def count_live_auth_sessions_for_user(username: str):
+    return len(await list_auth_sessions_for_user(username))
 
 
 async def store_refresh_token_state(jti: str, username: str, auth_session_id: str, expires_at: int):
@@ -1284,6 +1305,14 @@ async def revoke_my_auth_sessions(request: Request):
 async def health():
     """Check overall system health"""
     try:
+        if http_client is None:
+            raise RuntimeError("HTTP client is not initialized")
+
+        await ensure_redis_ready().ping()
+        db_ready = await ensure_db_ready().fetchval("SELECT 1")
+        if db_ready != 1:
+            raise RuntimeError("Postgres health query failed")
+
         rag_health = await http_client.get(
             SERVICES["rag"] + "/health",
             timeout=5
@@ -1293,10 +1322,15 @@ async def health():
         return {
             "status": "ok",
             "service": "ui-service",
+            "dependencies": {
+                "redis": "ok",
+                "postgres": "ok",
+                "rag": "ok",
+            },
             "timestamp": datetime.now().isoformat()
         }
 
-    except (httpx.HTTPError, RuntimeError) as e:
+    except (httpx.HTTPError, RuntimeError, asyncpg.PostgresError, redis.RedisError) as e:
         logger.error(f"Health check failed: {str(e)}")
         raise HTTPException(
             status_code=503,
@@ -1827,7 +1861,6 @@ async def admin_list_users(request: Request):
     user = await get_current_user(request)
     require_permission(user, "manage_users")
 
-    store = ensure_redis_ready()
     user_rows = await list_user_records()
     documents_resp = await http_client.get(
         f"{EMBED_URL}/documents",
@@ -1851,8 +1884,8 @@ async def admin_list_users(request: Request):
         "users": [
             {
                 **serialize_user(data["username"], data),
-                "sessions": await store.scard(session_index_key(data["username"])),
-                "active_auth_sessions": await store.scard(auth_session_index_key(data["username"])),
+                "sessions": await count_live_sessions_for_user(data["username"]),
+                "active_auth_sessions": await count_live_auth_sessions_for_user(data["username"]),
                 "documents": personal_document_counts.get(data["username"], 0),
             }
             for data in user_rows

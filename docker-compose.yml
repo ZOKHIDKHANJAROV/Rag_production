@@ -3,7 +3,7 @@ services:
   qdrant:
     image: qdrant/qdrant
     volumes:
-      - ./qdrant_data:/qdrant/storage
+      - qdrant_storage:/qdrant/storage
     environment:
       QDRANT__TELEMETRY_DISABLED: "true"
     restart: unless-stopped
@@ -203,6 +203,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  qdrant_storage:
   redis_data:
   postgres_data:
   hf_cache:

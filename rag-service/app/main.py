@@ -133,6 +133,27 @@ def service_headers():
     return {SERVICE_AUTH_HEADER: INTERNAL_SERVICE_TOKEN} if INTERNAL_SERVICE_TOKEN else {}
 
 
+def llm_health_url():
+    return f"{LLM_SERVICE_URL.rsplit('/', 1)[0]}/health"
+
+
+async def check_dependency_health():
+    await redis_client.ping()
+
+    llm_response, vector_response = await asyncio.gather(
+        client.get(llm_health_url(), timeout=5.0),
+        client.get(f"{VECTOR_SERVICE_URL}/health", timeout=5.0),
+    )
+    llm_response.raise_for_status()
+    vector_response.raise_for_status()
+
+    return {
+        "redis": "ok",
+        "llm": "ok",
+        "vector": "ok",
+    }
+
+
 @app.middleware("http")
 async def require_service_token(request: Request, call_next):
     if request.url.path in {"/health", "/metrics"}:
@@ -204,8 +225,18 @@ class AskRequest(BaseModel):
     scope_keys: list[str] = Field(default_factory=lambda: ["global"])
 
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health():
+    try:
+        dependencies = await check_dependency_health()
+    except (httpx.HTTPError, redis.RedisError, RuntimeError) as exc:
+        logging.error({"event": "healthcheck_failed", "error": str(exc)})
+        raise HTTPException(status_code=503, detail="Service unhealthy") from exc
+
+    return {
+        "status": "ok",
+        "service": "rag-service",
+        "dependencies": dependencies,
+    }
 
 @app.get("/metrics")
 def metrics():

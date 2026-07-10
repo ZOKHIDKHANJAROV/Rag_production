@@ -83,6 +83,9 @@ class StubRedis:
         self.values[key] = str(current)
         return current
 
+    async def ping(self):
+        return True
+
     async def aclose(self):
         return None
 
@@ -194,6 +197,9 @@ class StubDbPool:
     async def fetchval(self, query, *args):
         compact = " ".join(query.split())
 
+        if compact == "SELECT 1":
+            return 1
+
         if compact == "SELECT COUNT(*) FROM ui_users WHERE role = $1":
             role = args[0]
             return sum(1 for user in self.users.values() if user["role"] == role)
@@ -211,6 +217,22 @@ def prepare_ui_module(monkeypatch, tmp_path):
     ui_main.redis_client = StubRedis()
     ui_main.db_pool = StubDbPool()
     return ui_main
+
+
+class StubHttpResponse:
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise AssertionError(f"Unexpected HTTP status: {self.status_code}")
+
+
+class StubHttpClient:
+    async def get(self, url, timeout=None):
+        assert url.endswith("/health")
+        assert timeout == 5
+        return StubHttpResponse()
 
 
 def test_bootstrap_admin_from_env(monkeypatch, tmp_path):
@@ -313,3 +335,35 @@ def test_revoked_auth_session_blocks_access(monkeypatch, tmp_path):
         client.cookies.set(ui_main.ACCESS_COOKIE_NAME, access_token)
         response = client.get("/api/me")
         assert response.status_code == 401
+
+
+def test_stale_session_indexes_are_cleaned(monkeypatch, tmp_path):
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+
+    asyncio.run(ui_main.redis_client.sadd(ui_main.session_index_key("alice"), "stale-session"))
+    asyncio.run(ui_main.redis_client.sadd(ui_main.all_sessions_key(), "stale-session"))
+    asyncio.run(ui_main.redis_client.sadd(ui_main.auth_session_index_key("alice"), "stale-auth"))
+
+    assert asyncio.run(ui_main.count_live_sessions_for_user("alice")) == 0
+    assert asyncio.run(ui_main.count_live_auth_sessions_for_user("alice")) == 0
+    assert asyncio.run(ui_main.redis_client.smembers(ui_main.session_index_key("alice"))) == set()
+    assert asyncio.run(ui_main.redis_client.smembers(ui_main.auth_session_index_key("alice"))) == set()
+    assert asyncio.run(ui_main.redis_client.smembers(ui_main.all_sessions_key())) == set()
+
+
+def test_health_checks_postgres_redis_and_rag(monkeypatch, tmp_path):
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+    ui_main.http_client = StubHttpClient()
+
+    payload = asyncio.run(ui_main.health())
+
+    assert payload["status"] == "ok"
+    assert payload["dependencies"] == {
+        "redis": "ok",
+        "postgres": "ok",
+        "rag": "ok",
+    }
