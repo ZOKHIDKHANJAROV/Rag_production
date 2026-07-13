@@ -88,6 +88,7 @@
                     <button id="admin-tab-users" class="admin-tab active" onclick="setAdminTab('users')">Пользователи</button>
                     <button id="admin-tab-databases" class="admin-tab" onclick="setAdminTab('databases')">Базы знаний</button>
                     <button id="admin-tab-feedback" class="admin-tab" onclick="setAdminTab('feedback')">Обратная связь</button>
+                    <button id="admin-tab-voice" class="admin-tab" onclick="setAdminTab('voice')">Голос</button>
                 </div>
 
                 <div id="admin-users-view" class="admin-view">
@@ -128,6 +129,36 @@
                         </div>
                     </div>
                     <div id="admin-feedback-list" class="admin-table"></div>
+                </div>
+
+                <div id="admin-voice-view" class="admin-view hidden">
+                    <form class="voice-settings-form" onsubmit="saveVoiceSettings(event)">
+                        <label class="voice-setting-toggle">
+                            <input id="voice-enabled" type="checkbox">
+                            <span>Включить голосовой режим</span>
+                        </label>
+                        <label>
+                            <span>Режим голоса</span>
+                            <select id="voice-mode-setting">
+                                <option value="sft">Системный голос</option>
+                                <option value="zero_shot">Клонированный голос</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>ID системного голоса</span>
+                            <input id="voice-speaker-id" type="text" autocomplete="off">
+                        </label>
+                        <label>
+                            <span>Текст референса</span>
+                            <textarea id="voice-prompt-text" rows="3"></textarea>
+                        </label>
+                        <label>
+                            <span>Референс-аудио администратора</span>
+                            <input id="voice-reference-audio" type="file" accept="audio/wav,.wav">
+                        </label>
+                        <div id="voice-reference-status" class="voice-reference-status"></div>
+                        <button type="submit">Сохранить голос</button>
+                    </form>
                 </div>
             </section>
             {% endif %}
@@ -189,6 +220,7 @@
                         <span>Отправить</span>
                         <span class="send-icon">→</span>
                     </button>
+                    <button class="voice-open-btn" onclick="openVoiceMode()" title="Голосовой разговор" aria-label="Голосовой разговор">Микрофон</button>
                 </div>
 
                 <div id="loading-indicator" class="loading-indicator hidden">
@@ -200,6 +232,24 @@
     </div>
 
     <div id="toast" class="toast"></div>
+
+    <section id="voice-mode" class="voice-mode hidden" aria-live="polite">
+        <header class="voice-mode-header">
+            <div>
+                <span class="voice-mode-label">Голосовой разговор</span>
+                <strong id="voice-status">Подключение</strong>
+            </div>
+            <button class="btn-icon" onclick="closeVoiceMode()" title="Закрыть голосовой режим" aria-label="Закрыть голосовой режим">×</button>
+        </header>
+        <div class="voice-stage">
+            <div id="voice-orb" class="voice-orb" aria-hidden="true"></div>
+            <div id="voice-transcript" class="voice-transcript">Нажмите на микрофон и говорите</div>
+        </div>
+        <div class="voice-controls">
+            <button id="voice-mic-button" class="voice-mic-button" onclick="toggleVoiceRecording()" aria-label="Начать разговор">Микрофон</button>
+            <button class="voice-stop-button" onclick="stopVoicePlayback()" aria-label="Остановить ответ">Стоп</button>
+        </div>
+    </section>
 
     <script>
         const API_BASE = '';
@@ -213,6 +263,22 @@
         let allSessions = [];
         let adminActiveScope = 'global';
         let isDarkMode = localStorage.getItem('darkMode') === 'true';
+        let voiceSocket = null;
+        let voiceRecorder = null;
+        let voiceStream = null;
+        let voiceAudioContext = null;
+        let voiceAnalyser = null;
+        let voiceAnimationFrame = null;
+        let voiceChunkQueue = Promise.resolve();
+        let voiceRecording = false;
+        let voiceSawSpeech = false;
+        let voiceSilenceStartedAt = null;
+        let voiceNextPlaybackTime = 0;
+        let voiceSources = [];
+        let voiceQuestionMessage = null;
+        let voiceAnswerMessage = null;
+        let voiceSampleRate = 22050;
+        let voiceCommitOnStop = false;
 
         async function apiFetch(url, options = {}, retry = true) {
             const response = await fetch(url, options);
@@ -241,6 +307,8 @@
                 loadAdminUsers();
                 loadAdminDatabases();
                 loadAdminFeedback();
+                loadAdminVoiceSettings();
+                loadAdminVoiceSettings();
             }
             setInterval(() => loadSessions(), 30000);
             if (CAN_VIEW_SERVICES) {
@@ -740,6 +808,231 @@
             `).join('');
         }
 
+        async function loadAdminVoiceSettings() {
+            if (!CAN_MANAGE_ADMIN) return;
+            const response = await apiFetch(`${API_BASE}/api/admin/voice-settings`);
+            if (!response.ok) return;
+            const settings = (await response.json()).settings || {};
+            document.getElementById('voice-enabled').checked = Boolean(settings.enabled);
+            document.getElementById('voice-mode-setting').value = settings.mode || 'sft';
+            document.getElementById('voice-speaker-id').value = settings.speaker_id || '';
+            document.getElementById('voice-prompt-text').value = settings.prompt_text || '';
+            document.getElementById('voice-reference-status').textContent = settings.has_reference
+                ? 'Референс-аудио настроено'
+                : 'Референс-аудио не задано';
+        }
+
+        async function saveVoiceSettings(event) {
+            event.preventDefault();
+            const form = new FormData();
+            form.append('enabled', document.getElementById('voice-enabled').checked ? 'true' : 'false');
+            form.append('mode', document.getElementById('voice-mode-setting').value);
+            form.append('speaker_id', document.getElementById('voice-speaker-id').value.trim());
+            form.append('prompt_text', document.getElementById('voice-prompt-text').value.trim());
+            const reference = document.getElementById('voice-reference-audio').files[0];
+            if (reference) form.append('reference_audio', reference);
+
+            const response = await apiFetch(`${API_BASE}/api/admin/voice-settings`, {
+                method: 'POST',
+                body: form
+            });
+            if (!response.ok) {
+                showToast('Не удалось сохранить настройки голоса', 'error');
+                return;
+            }
+            showToast('Настройки голоса сохранены', 'success');
+            loadAdminVoiceSettings();
+        }
+
+        async function openVoiceMode() {
+            const response = await apiFetch(`${API_BASE}/api/voice/settings`);
+            if (!response.ok || !(await response.json()).enabled) {
+                showToast('Голосовой режим пока отключен администратором', 'error');
+                return;
+            }
+            document.getElementById('voice-mode').classList.remove('hidden');
+            await prepareVoiceAudio();
+            connectVoiceSocket();
+        }
+
+        function closeVoiceMode() {
+            stopVoiceRecording(false);
+            stopVoicePlayback();
+            if (voiceSocket) voiceSocket.close();
+            voiceSocket = null;
+            if (voiceStream) voiceStream.getTracks().forEach(track => track.stop());
+            voiceStream = null;
+            if (voiceAudioContext) voiceAudioContext.close();
+            voiceAudioContext = null;
+            cancelAnimationFrame(voiceAnimationFrame);
+            document.getElementById('voice-mode').classList.add('hidden');
+        }
+
+        async function prepareVoiceAudio() {
+            if (!voiceAudioContext) {
+                voiceAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            await voiceAudioContext.resume();
+            if (!voiceStream) {
+                voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const microphone = voiceAudioContext.createMediaStreamSource(voiceStream);
+                voiceAnalyser = voiceAudioContext.createAnalyser();
+                voiceAnalyser.fftSize = 512;
+                microphone.connect(voiceAnalyser);
+            }
+        }
+
+        function connectVoiceSocket() {
+            if (voiceSocket && voiceSocket.readyState <= WebSocket.OPEN) return;
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            voiceSocket = new WebSocket(`${protocol}://${window.location.host}/ws/voice`);
+            voiceSocket.onopen = () => setVoiceStatus('Готов к разговору', 'ready');
+            voiceSocket.onmessage = event => handleVoiceEvent(JSON.parse(event.data));
+            voiceSocket.onclose = () => {
+                if (!document.getElementById('voice-mode').classList.contains('hidden')) {
+                    setVoiceStatus('Соединение завершено', 'idle');
+                }
+            };
+            voiceSocket.onerror = () => setVoiceStatus('Не удалось подключить голосовой режим', 'error');
+        }
+
+        function handleVoiceEvent(event) {
+            if (event.type === 'ready') {
+                currentSessionId = event.session_id;
+                setVoiceStatus('Слушаю', 'listening');
+            } else if (event.type === 'transcribing') {
+                setVoiceStatus('Распознаю речь', 'thinking');
+            } else if (event.type === 'transcript') {
+                voiceQuestionMessage = { type: 'question', content: event.text, timestamp: new Date().toISOString() };
+                voiceAnswerMessage = { type: 'answer', content: '', sources: [], timestamp: new Date().toISOString() };
+                chatMessages.push(voiceQuestionMessage, voiceAnswerMessage);
+                document.getElementById('voice-transcript').textContent = event.text;
+                renderChat();
+                setVoiceStatus('Отвечаю', 'thinking');
+            } else if (event.type === 'assistant_delta') {
+                if (voiceAnswerMessage) voiceAnswerMessage.content += event.text || '';
+                document.getElementById('voice-transcript').textContent = voiceAnswerMessage?.content || '';
+                renderChat();
+            } else if (event.type === 'audio_segment' && event.state === 'format') {
+                voiceSampleRate = event.sample_rate || 22050;
+            } else if (event.type === 'audio') {
+                playVoicePcm(event.data, voiceSampleRate || 22050);
+            } else if (event.type === 'done') {
+                if (voiceAnswerMessage) {
+                    voiceAnswerMessage.answer_id = event.answer_id;
+                    voiceAnswerMessage.sources = event.sources || [];
+                }
+                renderChat();
+                setVoiceStatus('Слушаю', 'listening');
+                loadSessions();
+            } else if (event.type === 'audio_error') {
+                showToast('Текстовый ответ готов, но озвучивание недоступно', 'error');
+            } else if (event.type === 'error') {
+                setVoiceStatus(event.error || 'Ошибка голосового режима', 'error');
+            }
+        }
+
+        function setVoiceStatus(text, state) {
+            const status = document.getElementById('voice-status');
+            status.textContent = text;
+            document.getElementById('voice-orb').dataset.state = state;
+        }
+
+        async function toggleVoiceRecording() {
+            if (voiceRecording) {
+                stopVoiceRecording(true);
+                return;
+            }
+            if (!voiceSocket || voiceSocket.readyState !== WebSocket.OPEN) {
+                connectVoiceSocket();
+                return;
+            }
+            await startVoiceRecording();
+        }
+
+        async function startVoiceRecording() {
+            await prepareVoiceAudio();
+            voiceSawSpeech = false;
+            voiceSilenceStartedAt = null;
+            voiceChunkQueue = Promise.resolve();
+            const recorderOptions = MediaRecorder.isTypeSupported('audio/webm') ? { mimeType: 'audio/webm' } : undefined;
+            voiceRecorder = new MediaRecorder(voiceStream, recorderOptions);
+            voiceSocket.send(JSON.stringify({
+                action: 'start',
+                session_id: currentSessionId,
+                mime_type: voiceRecorder.mimeType || 'audio/webm'
+            }));
+            voiceRecorder.ondataavailable = event => {
+                if (!event.data.size) return;
+                voiceChunkQueue = voiceChunkQueue.then(async () => {
+                    if (voiceSocket?.readyState === WebSocket.OPEN) voiceSocket.send(await event.data.arrayBuffer());
+                });
+            };
+            voiceRecorder.onstop = () => voiceChunkQueue.then(() => {
+                if (voiceCommitOnStop && voiceSocket?.readyState === WebSocket.OPEN) {
+                    voiceSocket.send(JSON.stringify({ action: 'commit' }));
+                }
+            });
+            voiceRecorder.start(250);
+            voiceRecording = true;
+            document.getElementById('voice-mic-button').classList.add('active');
+            setVoiceStatus('Говорите', 'speaking');
+            monitorVoiceActivity();
+        }
+
+        function monitorVoiceActivity() {
+            if (!voiceRecording || !voiceAnalyser) return;
+            const samples = new Uint8Array(voiceAnalyser.fftSize);
+            voiceAnalyser.getByteTimeDomainData(samples);
+            const rms = Math.sqrt(samples.reduce((sum, value) => sum + Math.pow((value - 128) / 128, 2), 0) / samples.length);
+            if (rms > 0.025) {
+                voiceSawSpeech = true;
+                voiceSilenceStartedAt = null;
+            } else if (voiceSawSpeech) {
+                voiceSilenceStartedAt ||= performance.now();
+                if (performance.now() - voiceSilenceStartedAt > 900) {
+                    stopVoiceRecording(true);
+                    return;
+                }
+            }
+            voiceAnimationFrame = requestAnimationFrame(monitorVoiceActivity);
+        }
+
+        function stopVoiceRecording(commit) {
+            if (!voiceRecording) return;
+            voiceRecording = false;
+            voiceCommitOnStop = commit;
+            cancelAnimationFrame(voiceAnimationFrame);
+            document.getElementById('voice-mic-button').classList.remove('active');
+            if (voiceRecorder?.state !== 'inactive') voiceRecorder.stop();
+            if (!commit && voiceSocket?.readyState === WebSocket.OPEN) voiceSocket.send(JSON.stringify({ action: 'stop' }));
+            setVoiceStatus(commit ? 'Распознаю речь' : 'Слушаю', commit ? 'thinking' : 'listening');
+        }
+
+        function playVoicePcm(base64, sampleRate) {
+            if (!voiceAudioContext) return;
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+            const samples = new Int16Array(bytes.buffer);
+            const buffer = voiceAudioContext.createBuffer(1, samples.length, sampleRate);
+            const channel = buffer.getChannelData(0);
+            for (let index = 0; index < samples.length; index += 1) channel[index] = samples[index] / 32768;
+            const source = voiceAudioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(voiceAudioContext.destination);
+            source.start(Math.max(voiceAudioContext.currentTime + 0.05, voiceNextPlaybackTime));
+            voiceNextPlaybackTime = Math.max(voiceAudioContext.currentTime + 0.05, voiceNextPlaybackTime) + buffer.duration;
+            voiceSources.push(source);
+            source.onended = () => voiceSources = voiceSources.filter(item => item !== source);
+        }
+
+        function stopVoicePlayback() {
+            voiceSources.forEach(source => source.stop());
+            voiceSources = [];
+            voiceNextPlaybackTime = 0;
+        }
+
         function toggleAdminPanel() {
             const panel = document.getElementById('admin-panel');
             if (!panel) return;
@@ -755,10 +1048,13 @@
             document.getElementById('admin-tab-users').classList.toggle('active', tab === 'users');
             document.getElementById('admin-tab-databases').classList.toggle('active', tab === 'databases');
             document.getElementById('admin-tab-feedback').classList.toggle('active', tab === 'feedback');
+            document.getElementById('admin-tab-voice').classList.toggle('active', tab === 'voice');
             document.getElementById('admin-users-view').classList.toggle('hidden', tab !== 'users');
             document.getElementById('admin-databases-view').classList.toggle('hidden', tab !== 'databases');
             document.getElementById('admin-feedback-view').classList.toggle('hidden', tab !== 'feedback');
+            document.getElementById('admin-voice-view').classList.toggle('hidden', tab !== 'voice');
             if (tab === 'feedback') loadAdminFeedback();
+            if (tab === 'voice') loadAdminVoiceSettings();
         }
 
         async function loadAdminUsers() {

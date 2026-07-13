@@ -32,12 +32,13 @@ def test_document_metadata_extracts_title_date_and_sections():
     assert sections == ["Safety policy", "Scope"]
 
 
-def test_ocr_is_used_only_for_short_scanned_content(monkeypatch):
+def test_ocr_is_used_only_for_nonempty_personal_documents_without_text(monkeypatch):
     ingestion = load_ingestion_module()
     monkeypatch.setattr(ingestion, "OCR_ENABLED", True)
-    monkeypatch.setattr(ingestion, "OCR_MIN_TEXT_CHARS", 80)
 
-    assert ingestion.should_use_ocr("scan.pdf", "too short")
-    assert ingestion.should_use_ocr("receipt.png", "")
-    assert not ingestion.should_use_ocr("report.docx", "")
-    assert not ingestion.should_use_ocr("report.pdf", "x" * 80)
+    assert ingestion.should_use_ocr("scan.pdf", "", "user:alice", 1024)
+    assert ingestion.should_use_ocr("receipt.png", "", "user:alice", 1024)
+    assert not ingestion.should_use_ocr("report.pdf", "already extracted", "user:alice", 1024)
+    assert not ingestion.should_use_ocr("report.pdf", "", "global", 1024)
+    assert not ingestion.should_use_ocr("report.pdf", "", "user:alice", 0)
+    assert not ingestion.should_use_ocr("report.docx", "", "user:alice", 1024)

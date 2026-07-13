@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response, Form, UploadFile, File, HTTPException
+from fastapi import FastAPI, Request, Response, Form, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,7 @@ import base64
 import time
 import binascii
 import asyncio
+import re
 import redis.asyncio as redis
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +80,8 @@ INGEST_URL = os.getenv(
     "INGESTION_SERVICE_URL",
     "http://ingestion-service:8004/upload"
 )
+ASR_SERVICE_URL = os.getenv("ASR_SERVICE_URL", "http://asr-service:8007")
+TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8008")
 
 EMBED_URL = os.getenv(
     "EMBEDDING_SERVICE_URL",
@@ -224,7 +227,9 @@ SERVICES = {
     "embedding": f"{EMBED_URL}",
     "ingestion": INGEST_URL.replace("/upload", ""),
     "llm": os.getenv("LLM_SERVICE_URL", "http://llm-service:8002"),
-    "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333")
+    "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333"),
+    "asr": ASR_SERVICE_URL,
+    "tts": TTS_SERVICE_URL,
 }
 
 http_client: httpx.AsyncClient | None = None
@@ -310,8 +315,88 @@ async def init_postgres_schema():
 
         CREATE INDEX IF NOT EXISTS rag_feedback_selection_idx
         ON rag_feedback (selected_for_evaluation, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS voice_settings (
+            id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+            enabled BOOLEAN NOT NULL DEFAULT FALSE,
+            mode TEXT NOT NULL DEFAULT 'sft',
+            speaker_id TEXT NOT NULL DEFAULT '',
+            prompt_text TEXT NOT NULL DEFAULT '',
+            has_reference BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_by TEXT,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        INSERT INTO voice_settings (id)
+        VALUES (TRUE)
+        ON CONFLICT (id) DO NOTHING;
         """
     )
+
+
+def default_voice_settings():
+    return {
+        "enabled": False,
+        "mode": "sft",
+        "speaker_id": "",
+        "prompt_text": "",
+        "has_reference": False,
+        "updated_by": None,
+        "updated_at": None,
+    }
+
+
+def voice_settings_from_row(row: asyncpg.Record | None):
+    if row is None:
+        return default_voice_settings()
+    return {
+        "enabled": row["enabled"],
+        "mode": row["mode"],
+        "speaker_id": row["speaker_id"],
+        "prompt_text": row["prompt_text"],
+        "has_reference": row["has_reference"],
+        "updated_by": row["updated_by"],
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+async def get_voice_settings():
+    row = await ensure_db_ready().fetchrow(
+        """
+        SELECT enabled, mode, speaker_id, prompt_text, has_reference, updated_by, updated_at
+        FROM voice_settings
+        WHERE id = TRUE
+        """
+    )
+    return voice_settings_from_row(row)
+
+
+async def save_voice_settings(settings: Dict, updated_by: str):
+    row = await ensure_db_ready().fetchrow(
+        """
+        INSERT INTO voice_settings (
+            id, enabled, mode, speaker_id, prompt_text, has_reference, updated_by
+        )
+        VALUES (TRUE, $1, $2, $3, $4, $5, $6)
+        ON CONFLICT (id)
+        DO UPDATE SET
+            enabled = EXCLUDED.enabled,
+            mode = EXCLUDED.mode,
+            speaker_id = EXCLUDED.speaker_id,
+            prompt_text = EXCLUDED.prompt_text,
+            has_reference = EXCLUDED.has_reference,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW()
+        RETURNING enabled, mode, speaker_id, prompt_text, has_reference, updated_by, updated_at
+        """,
+        settings["enabled"],
+        settings["mode"],
+        settings["speaker_id"],
+        settings["prompt_text"],
+        settings["has_reference"],
+        updated_by,
+    )
+    return voice_settings_from_row(row)
 
 
 def record_to_user(row: asyncpg.Record | None):
@@ -1232,6 +1317,61 @@ def request_scope_keys(user: Dict) -> List[str]:
     return ["global", user_scope_key(user["username"])]
 
 
+def split_voice_tts_segments(text: str):
+    parts = re.split(r"(?<=[.!?。！？])\s+", text)
+    if len(parts) == 1:
+        return [], text
+    return [part for part in parts[:-1] if part.strip()], parts[-1]
+
+
+async def get_current_websocket_user(websocket: WebSocket):
+    token = websocket.cookies.get(ACCESS_COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return await user_from_access_payload(decode_jwt(token, "access"))
+
+
+async def transcribe_voice_audio(audio_bytes: bytes, mime_type: str):
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio")
+    if http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client is not initialized")
+
+    suffix = ".webm" if "webm" in mime_type else ".ogg"
+    response = await http_client.post(
+        f"{ASR_SERVICE_URL}/transcribe",
+        files={"audio": (f"utterance{suffix}", audio_bytes, mime_type)},
+        headers=service_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return (response.json().get("text") or "").strip()
+
+
+async def stream_voice_audio(websocket: WebSocket, text: str):
+    if http_client is None or not text.strip():
+        return
+
+    await websocket.send_json({"type": "audio_segment", "state": "start", "sample_rate": 22050})
+    async with http_client.stream(
+        "POST",
+        f"{TTS_SERVICE_URL}/synthesize/stream",
+        data={"text": text.strip()},
+        headers=service_headers(),
+        timeout=REQUEST_TIMEOUT,
+    ) as response:
+        response.raise_for_status()
+        sample_rate = int(response.headers.get("X-Sample-Rate", "22050"))
+        await websocket.send_json({"type": "audio_segment", "state": "format", "sample_rate": sample_rate})
+        async for chunk in response.aiter_bytes():
+            if chunk:
+                await websocket.send_json({
+                    "type": "audio",
+                    "data": base64.b64encode(chunk).decode(),
+                })
+    await websocket.send_json({"type": "audio_segment", "state": "end"})
+
+
 def validate_scope_access(user: Dict, scope_key: str):
     scope = (scope_key or "global").strip() or "global"
 
@@ -1756,6 +1896,149 @@ async def ask_stream(
         )
 
 
+async def stream_voice_answer(websocket: WebSocket, user: Dict, session_id: str, session: Dict, question: str):
+    if http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client is not initialized")
+
+    payload = {
+        "question": question,
+        "session_id": rag_session_id(user["username"], session_id),
+        "top_k": 5,
+        "scope_keys": request_scope_keys(user),
+    }
+    answer_parts = []
+    sources = []
+    sentence_buffer = ""
+    answer_id = str(uuid.uuid4())
+
+    async with http_client.stream(
+        "POST",
+        RAG_STREAM_URL,
+        json=payload,
+        headers=service_headers(),
+        timeout=REQUEST_TIMEOUT,
+    ) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+            event = json.loads(line)
+            event_type = event.get("type")
+            if event_type == "delta":
+                delta = event.get("text", "")
+                answer_parts.append(delta)
+                sentence_buffer += delta
+                await websocket.send_json({"type": "assistant_delta", "text": delta})
+                completed_segments, sentence_buffer = split_voice_tts_segments(sentence_buffer)
+                for segment in completed_segments:
+                    try:
+                        await stream_voice_audio(websocket, segment)
+                    except httpx.HTTPError:
+                        await websocket.send_json({"type": "audio_error", "error": "Voice synthesis is unavailable"})
+            elif event_type in {"sources", "done"}:
+                sources = event.get("sources", sources)
+
+    if sentence_buffer.strip():
+        try:
+            await stream_voice_audio(websocket, sentence_buffer)
+        except httpx.HTTPError:
+            await websocket.send_json({"type": "audio_error", "error": "Voice synthesis is unavailable"})
+
+    answer = "".join(answer_parts)
+    session["history"].append({
+        "type": "question",
+        "content": question,
+        "timestamp": datetime.now().isoformat(),
+    })
+    session["history"].append({
+        "type": "answer",
+        "answer_id": answer_id,
+        "content": answer,
+        "sources": sources,
+        "timestamp": datetime.now().isoformat(),
+    })
+    await save_session_state(session_id, session)
+    await websocket.send_json({
+        "type": "done",
+        "answer_id": answer_id,
+        "sources": sources,
+        "session_id": session_id,
+    })
+
+
+@app.websocket("/ws/voice")
+async def voice_websocket(websocket: WebSocket):
+    try:
+        user = await get_current_websocket_user(websocket)
+    except HTTPException:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    session_id = None
+    session = None
+    mime_type = "audio/webm"
+    audio_chunks = bytearray()
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+            if message.get("bytes") is not None:
+                if session_id:
+                    audio_chunks.extend(message["bytes"])
+                continue
+            if message.get("text") is None:
+                continue
+
+            event = json.loads(message["text"])
+            action = event.get("action")
+            if action == "start":
+                settings = await get_voice_settings()
+                if not settings["enabled"]:
+                    await websocket.send_json({"type": "error", "error": "Voice mode is disabled by an administrator"})
+                    continue
+
+                requested_session_id = event.get("session_id") or str(uuid.uuid4())
+                loaded_session = await load_session_state(requested_session_id)
+                if loaded_session is None:
+                    _, loaded_session = await create_session_state(user["username"], session_id=requested_session_id)
+                elif loaded_session.get("username") != user["username"]:
+                    await websocket.send_json({"type": "error", "error": "Voice session belongs to another user"})
+                    continue
+
+                session_id = requested_session_id
+                session = loaded_session
+                mime_type = event.get("mime_type") or "audio/webm"
+                audio_chunks.clear()
+                await websocket.send_json({"type": "ready", "session_id": session_id})
+            elif action == "commit":
+                if not session_id or session is None:
+                    await websocket.send_json({"type": "error", "error": "Voice session is not initialized"})
+                    continue
+
+                await websocket.send_json({"type": "transcribing"})
+                transcript = await transcribe_voice_audio(bytes(audio_chunks), mime_type)
+                audio_chunks.clear()
+                if not transcript:
+                    await websocket.send_json({"type": "idle"})
+                    continue
+
+                await websocket.send_json({"type": "transcript", "text": transcript})
+                await stream_voice_answer(websocket, user, session_id, session, transcript)
+            elif action == "stop":
+                audio_chunks.clear()
+                await websocket.send_json({"type": "idle"})
+    except WebSocketDisconnect:
+        return
+    except (HTTPException, httpx.HTTPError) as exc:
+        logger.warning("Voice websocket failed for user=%s: %s", user["username"], exc)
+        await websocket.send_json({"type": "error", "error": "Voice services are unavailable"})
+    except (json.JSONDecodeError, ValueError):
+        await websocket.send_json({"type": "error", "error": "Invalid voice message"})
+
+
 @app.post("/api/feedback")
 async def submit_feedback(request: Request, feedback: FeedbackRequest):
     user = await get_current_user(request)
@@ -2056,6 +2339,80 @@ async def list_sessions(request: Request):
 # =========================
 # ADMIN
 # =========================
+
+@app.get("/api/voice/settings")
+async def voice_settings(request: Request):
+    await get_current_user(request)
+    settings = await get_voice_settings()
+    return {"enabled": settings["enabled"], "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/api/admin/voice-settings")
+async def admin_voice_settings(request: Request):
+    user = await get_current_user(request)
+    require_permission(user, "manage_users")
+    return {"settings": await get_voice_settings(), "timestamp": datetime.now().isoformat()}
+
+
+@app.post("/api/admin/voice-settings")
+async def admin_update_voice_settings(
+    request: Request,
+    enabled: bool = Form(False),
+    mode: str = Form("sft"),
+    speaker_id: str = Form(""),
+    prompt_text: str = Form(""),
+    reference_audio: UploadFile | None = File(None),
+):
+    user = await get_current_user(request)
+    require_permission(user, "manage_users")
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"sft", "zero_shot"}:
+        raise HTTPException(status_code=400, detail="Unsupported voice mode")
+    if http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client is not initialized")
+
+    files = None
+    if reference_audio and reference_audio.filename:
+        reference_bytes = await reference_audio.read()
+        files = {
+            "reference_audio": (
+                reference_audio.filename,
+                reference_bytes,
+                reference_audio.content_type or "audio/wav",
+            )
+        }
+
+    try:
+        response = await http_client.post(
+            f"{TTS_SERVICE_URL}/admin/profile",
+            data={
+                "enabled": str(enabled).lower(),
+                "mode": normalized_mode,
+                "speaker_id": speaker_id.strip(),
+                "prompt_text": prompt_text.strip(),
+            },
+            files=files,
+            headers=service_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="TTS service is unavailable") from exc
+
+    settings = await save_voice_settings(response.json(), user["username"])
+    await write_admin_audit_log(
+        user["username"],
+        "update_voice_settings",
+        "voice",
+        "system",
+        {
+            "enabled": settings["enabled"],
+            "mode": settings["mode"],
+            "speaker_id": settings["speaker_id"],
+            "has_reference": settings["has_reference"],
+        },
+    )
+    return {"settings": settings, "timestamp": datetime.now().isoformat()}
 
 @app.get("/api/admin/users")
 async def admin_list_users(request: Request):

@@ -112,6 +112,67 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  asr-service:
+    build: ./asr-service
+    profiles: ["voice"]
+    env_file:
+      - .env
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      - ASR_MODEL=${ASR_MODEL:-small}
+      - ASR_DEVICE=${ASR_DEVICE:-cuda}
+      - ASR_COMPUTE_TYPE=${ASR_COMPUTE_TYPE:-float16}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
+    gpus: all
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  cosyvoice-service:
+    build:
+      context: ./cosyvoice-service
+      args:
+        COSYVOICE_REF: ${COSYVOICE_REF:-main}
+    profiles: ["voice"]
+    environment:
+      - COSYVOICE_MODEL=${COSYVOICE_MODEL:-iic/CosyVoice-300M-SFT}
+    gpus: all
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:50000/docs', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+    restart: unless-stopped
+
+  tts-service:
+    build: ./tts-service
+    profiles: ["voice"]
+    env_file:
+      - .env
+    volumes:
+      - tts_data:/app/data
+    depends_on:
+      cosyvoice-service:
+        condition: service_healthy
+    environment:
+      - COSYVOICE_URL=http://cosyvoice-service:50000
+      - TTS_SAMPLE_RATE=${TTS_SAMPLE_RATE:-22050}
+      - TTS_REQUEST_TIMEOUT=${TTS_REQUEST_TIMEOUT:-300}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
   embedding-service:
     build: ./embedding-service
     env_file:
@@ -202,7 +263,6 @@ services:
       - INGESTION_HTTP_MAX_KEEPALIVE=20
       - OCR_ENABLED=${OCR_ENABLED:-false}
       - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://ocr-service:8006/extract}
-      - OCR_MIN_TEXT_CHARS=${OCR_MIN_TEXT_CHARS:-80}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]
@@ -225,6 +285,8 @@ services:
       - UI_WORKERS=1
       - UI_HTTP_MAX_CONNECTIONS=200
       - UI_HTTP_MAX_KEEPALIVE=50
+      - ASR_SERVICE_URL=${ASR_SERVICE_URL:-http://asr-service:8007}
+      - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://tts-service:8008}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     depends_on:
       rag-service:
@@ -261,3 +323,4 @@ volumes:
   postgres_data:
   hf_cache:
   ui_data:
+  tts_data:

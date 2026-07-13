@@ -2,7 +2,7 @@
 
 This project uses [Baidu Unlimited-OCR](https://github.com/baidu/Unlimited-OCR) as an optional internal OCR service for scanned PDFs and uploaded PNG, JPEG, and WebP images.
 
-Native PDF and DOCX extraction remains the fast default. Ingestion sends a PDF to OCR only when native extraction yields fewer than `OCR_MIN_TEXT_CHARS` non-whitespace characters. Images always require OCR.
+Native PDF and DOCX extraction remains the fast default. OCR is considered only for a nonempty private PDF or supported image when native extraction returns no text at all. Shared documents and documents with any native text never trigger OCR.
 
 ## Start the OCR Profile
 
@@ -10,7 +10,6 @@ An NVIDIA GPU is required by the upstream vLLM deployment. Set the following in 
 
 ```dotenv
 OCR_ENABLED=true
-OCR_MIN_TEXT_CHARS=80
 OCR_MAX_PAGES=20
 OCR_RENDER_DPI=150
 OCR_MAX_TOKENS=32768

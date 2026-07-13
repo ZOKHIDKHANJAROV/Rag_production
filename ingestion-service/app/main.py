@@ -18,7 +18,6 @@ HTTP_MAX_CONNECTIONS = int(os.getenv("INGESTION_HTTP_MAX_CONNECTIONS", "100"))
 HTTP_MAX_KEEPALIVE = int(os.getenv("INGESTION_HTTP_MAX_KEEPALIVE", "20"))
 OCR_ENABLED = os.getenv("OCR_ENABLED", "false").lower() == "true"
 OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", "http://ocr-service:8006/extract")
-OCR_MIN_TEXT_CHARS = int(os.getenv("OCR_MIN_TEXT_CHARS", "80"))
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 SERVICE_AUTH_HEADER = "X-Service-Token"
 
@@ -109,13 +108,14 @@ async def extract_text_with_ocr(file_bytes: bytes, filename: str):
     return response.json().get("text", "")
 
 
-def should_use_ocr(filename: str, text: str) -> bool:
+def should_use_ocr(filename: str, text: str, scope_key: str, file_size: int) -> bool:
     supported_extensions = (".pdf", ".png", ".jpg", ".jpeg", ".webp")
-    normalized_text_length = len(re.sub(r"\s+", "", text))
     return (
         OCR_ENABLED
         and filename.lower().endswith(supported_extensions)
-        and normalized_text_length < OCR_MIN_TEXT_CHARS
+        and scope_key.startswith("user:")
+        and file_size > 0
+        and not text.strip()
     )
 
 
@@ -276,7 +276,7 @@ async def upload_file(
         native_extraction_error = e
 
     extraction_engine = "native"
-    if should_use_ocr(filename, text):
+    if should_use_ocr(filename, text, scope_key, len(file_bytes)):
         try:
             ocr_text = await extract_text_with_ocr(file_bytes, file.filename)
         except (HTTPException, httpx.HTTPError) as error:
