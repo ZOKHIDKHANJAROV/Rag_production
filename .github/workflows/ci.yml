@@ -33,6 +33,7 @@ jobs:
             ocr-service/requirements.txt
             asr-service/requirements.txt
             tts-service/requirements.txt
+            zup-service/requirements.txt
 
       - name: Install dependencies
         run: |
@@ -43,6 +44,7 @@ jobs:
           pip install -r ocr-service/requirements.txt
           pip install -r asr-service/requirements.txt
           pip install -r tts-service/requirements.txt
+          pip install -r zup-service/requirements.txt
 
       - name: Run tests
         run: pytest -q

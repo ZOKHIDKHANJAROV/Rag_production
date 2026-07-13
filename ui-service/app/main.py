@@ -82,6 +82,7 @@ INGEST_URL = os.getenv(
 )
 ASR_SERVICE_URL = os.getenv("ASR_SERVICE_URL", "http://asr-service:8007")
 TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8008")
+ZUP_SERVICE_URL = os.getenv("ZUP_SERVICE_URL", "http://zup-service:8009")
 
 EMBED_URL = os.getenv(
     "EMBEDDING_SERVICE_URL",
@@ -134,11 +135,13 @@ UPLOAD_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("UPLOAD_RATE_LIMIT_WINDOW_SECON
 # Backward-compatible alias for code that expects the old auth cookie name.
 AUTH_COOKIE_NAME = ACCESS_COOKIE_NAME
 ROLE_ADMIN = "admin"
+ROLE_SUPERUSER = "superuser"
 ROLE_USER = "user"
-KNOWN_ROLES = {ROLE_ADMIN, ROLE_USER}
+KNOWN_ROLES = {ROLE_ADMIN, ROLE_SUPERUSER, ROLE_USER}
 
 ROLE_LABELS = {
     ROLE_ADMIN: "РђРґРјРёРЅ",
+    ROLE_SUPERUSER: "РЎСѓРїРµСЂРїРѕР»СЊР·РѕРІР°С‚РµР»СЊ",
     ROLE_USER: "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ",
 }
 
@@ -150,6 +153,13 @@ ROLE_PERMISSIONS = {
         "manage_documents",
         "manage_users",
         "view_services",
+        "search_zup_data",
+    },
+    ROLE_SUPERUSER: {
+        "view_own_sessions",
+        "delete_own_sessions",
+        "view_own_documents",
+        "search_zup_data",
     },
     ROLE_USER: {
         "view_own_sessions",
@@ -230,6 +240,7 @@ SERVICES = {
     "qdrant": os.getenv("QDRANT_URL", "http://qdrant:6333"),
     "asr": ASR_SERVICE_URL,
     "tts": TTS_SERVICE_URL,
+    "zup": ZUP_SERVICE_URL,
 }
 
 http_client: httpx.AsyncClient | None = None
@@ -2347,6 +2358,42 @@ async def voice_settings(request: Request):
     return {"enabled": settings["enabled"], "timestamp": datetime.now().isoformat()}
 
 
+@app.get("/api/zup/employees")
+async def search_zup_employees(request: Request, query: str, limit: int = 20):
+    user = await get_current_user(request)
+    require_permission(user, "search_zup_data")
+    normalized_query = query.strip()
+    if len(normalized_query) < 2:
+        raise HTTPException(status_code=400, detail="Search query must contain at least two characters")
+    if http_client is None:
+        raise HTTPException(status_code=503, detail="HTTP client is not initialized")
+
+    try:
+        response = await http_client.get(
+            f"{ZUP_SERVICE_URL}/employees/search",
+            params={"query": normalized_query, "limit": max(1, min(limit, 100))},
+            headers=service_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="1C ZUP search is unavailable") from exc
+
+    result = response.json()
+    employees = result.get("employees", [])
+    await write_admin_audit_log(
+        user["username"],
+        "search_zup_employees",
+        "zup",
+        None,
+        {
+            "query_hmac": hmac.new(SECRET_KEY.encode(), normalized_query.encode(), hashlib.sha256).hexdigest(),
+            "result_count": len(employees),
+        },
+    )
+    return {"employees": employees, "timestamp": datetime.now().isoformat()}
+
+
 @app.get("/api/admin/voice-settings")
 async def admin_voice_settings(request: Request):
     user = await get_current_user(request)
@@ -2788,6 +2835,7 @@ async def chat_page(request: Request):
                     "user": rotated["user"],
                     "can_view_services": has_permission(rotated["user"], "view_services"),
                     "can_manage_admin": has_permission(rotated["user"], "manage_users"),
+                    "can_search_zup": has_permission(rotated["user"], "search_zup_data"),
                 }
             )
             set_auth_cookies(response, rotated["access_token"], rotated["refresh_token"])
@@ -2810,6 +2858,7 @@ async def chat_page(request: Request):
             "user": user,
             "can_view_services": has_permission(user, "view_services"),
             "can_manage_admin": has_permission(user, "manage_users"),
+            "can_search_zup": has_permission(user, "search_zup_data"),
         }
     )
 
