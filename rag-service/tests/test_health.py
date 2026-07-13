@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 RAG_ROOT = ROOT / "rag-service"
 RAG_MAIN_PATH = RAG_ROOT / "app" / "main.py"
 RAG_MODULE = None
+EVALUATE_PATH = RAG_ROOT / "evaluation" / "evaluate.py"
+EVALUATE_MODULE = None
 
 
 def load_rag_module():
@@ -31,6 +33,21 @@ def load_rag_module():
     finally:
         os.chdir(previous_cwd)
     RAG_MODULE = module
+    return module
+
+
+def load_evaluate_module():
+    global EVALUATE_MODULE
+    if EVALUATE_MODULE is not None:
+        return EVALUATE_MODULE
+
+    module_name = f"rag_evaluate_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, EVALUATE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    EVALUATE_MODULE = module
     return module
 
 
@@ -178,3 +195,55 @@ def test_trim_context_skips_an_oversized_chunk():
         rag_main.MAX_CONTEXT_CHARS = original_limit
 
     assert contexts == ["short", "tiny"]
+
+
+def test_evaluation_reports_source_and_answer_match():
+    evaluate = load_evaluate_module()
+    case = {
+        "id": "policy-deadline",
+        "expected_sources": ["policy.pdf"],
+        "expected_answer_contains": ["Friday"],
+    }
+    payload = {
+        "answer": "The deadline is Friday.",
+        "sources": [
+            {"document_id": "doc-1", "filename": "policy.pdf"},
+            {"document_id": "doc-2", "filename": "archive.pdf"},
+        ],
+    }
+
+    result = evaluate.evaluate_response(case, payload, 42.0, 3)
+
+    assert result["source_hit"] is True
+    assert result["answer_match"] is True
+    assert result["source_backed"] is True
+
+
+def test_evaluation_report_calculates_metrics():
+    evaluate = load_evaluate_module()
+    report = evaluate.build_report([
+        {
+            "id": "one",
+            "latency_ms": 10.0,
+            "source_hit": True,
+            "answer_match": True,
+            "refusal_correct": None,
+            "source_backed": True,
+            "source_count": 1,
+        },
+        {
+            "id": "two",
+            "latency_ms": 30.0,
+            "source_hit": False,
+            "answer_match": False,
+            "refusal_correct": True,
+            "source_backed": False,
+            "source_count": 0,
+        },
+    ], 0)
+
+    assert report["source_hit_at_k"] == 0.5
+    assert report["answer_keyword_match_rate"] == 0.5
+    assert report["refusal_accuracy"] == 1.0
+    assert report["source_backed_answer_rate"] == 0.5
+    assert report["latency_ms"]["p95"] == 29.0
