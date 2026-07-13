@@ -35,6 +35,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
           pip install -r rag-service/requirements.txt
+          pip install -r ingestion-service/requirements.txt
 
       - name: Run tests
         run: pytest -q

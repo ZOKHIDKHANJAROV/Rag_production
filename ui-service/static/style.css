@@ -987,6 +987,74 @@ html[data-theme="dark"] .empty-logo {
   font-weight: 800;
 }
 
+.citation-link {
+  margin: 0 2px;
+  padding: 1px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--gold-strong);
+  background: transparent;
+  color: var(--gold-strong);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.feedback-controls {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.feedback-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.feedback-btn:hover,
+.feedback-btn.active {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold-strong);
+}
+
+.admin-feedback-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.admin-feedback-row {
+  align-items: flex-start;
+}
+
+.admin-feedback-row > div {
+  min-width: 0;
+}
+
+.admin-feedback-row strong,
+.admin-feedback-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-feedback-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .sources-panel {
   max-height: 310px;
   padding: 16px 24px;

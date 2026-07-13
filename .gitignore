@@ -15,3 +15,6 @@ desktop.ini
 .ruff_cache/
 
 data/
+
+rag-service/evaluation/questions.local.json
+rag-service/evaluation/report.local.json

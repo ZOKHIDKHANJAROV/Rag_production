@@ -7,6 +7,8 @@ from pypdf import PdfReader
 from docx import Document
 from io import BytesIO
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 
 app = FastAPI(title="Ingestion Service")
 
@@ -139,12 +141,78 @@ def chunk_text(text, chunk_size=800, overlap=100):
     return chunks
 
 
+def derive_document_title(filename: str, text: str):
+    for line in text.splitlines()[:80]:
+        candidate = line.strip().lstrip("#").strip()
+        if 4 <= len(candidate) <= 160:
+            return candidate
+
+    return Path(filename).stem.replace("_", " ").replace("-", " ").strip()[:160]
+
+
+def normalize_document_date(value: str | None):
+    if not value:
+        return None
+
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2}|\d{2}[./-]\d{2}[./-]\d{4})\b", value)
+    if not match:
+        return None
+
+    raw_date = match.group(1).replace("/", ".").replace("-", ".")
+    for date_format in ("%Y.%m.%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(raw_date, date_format).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def split_document_sections(text: str, fallback_title: str):
+    sections = []
+    current_title = fallback_title
+    current_lines = []
+
+    def append_section():
+        content = "\n".join(current_lines).strip()
+        if content:
+            sections.append((current_title, content))
+
+    for line in text.splitlines():
+        heading_match = re.match(
+            r"^\s*(?:#{1,6}\s+|\d+(?:\.\d+)*[.)]?\s+)(.{3,160})$",
+            line,
+        )
+        if heading_match:
+            append_section()
+            current_title = heading_match.group(1).strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    append_section()
+    return sections or [(fallback_title, text)]
+
+
+def chunk_document(text: str, fallback_title: str):
+    chunks = []
+    sections = []
+
+    for section_title, section_text in split_document_sections(text, fallback_title):
+        for chunk in chunk_text(section_text):
+            chunks.append(chunk)
+            sections.append(section_title)
+
+    return chunks, sections
+
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
     scope_key: str = Form("global"),
     owner_username: str | None = Form(None),
-    knowledge_base: str = Form("global")
+    knowledge_base: str = Form("global"),
+    document_title: str | None = Form(None),
+    document_date: str | None = Form(None),
 ):
 
     # 1️⃣ Читаем файл полностью
@@ -181,7 +249,13 @@ async def upload_file(
         raise HTTPException(status_code=422, detail="No text extracted from file")
 
     # 4️⃣ Chunking
-    chunks = chunk_text(text)
+    title = (document_title or derive_document_title(file.filename, text)).strip()[:160]
+    document_type = Path(file.filename).suffix.lower().lstrip(".") or "unknown"
+    detected_date = normalize_document_date(document_date) or normalize_document_date(
+        f"{file.filename}\n{text[:4000]}"
+    )
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+    chunks, sections = chunk_document(text, title)
 
     if not chunks:
         raise HTTPException(status_code=422, detail="No chunks generated")
@@ -194,6 +268,11 @@ async def upload_file(
                 "texts": chunks,
                 "document_id": file_hash,
                 "filename": file.filename,
+                "title": title,
+                "sections": sections,
+                "document_date": detected_date,
+                "document_type": document_type,
+                "uploaded_at": uploaded_at,
                 "scope_key": scope_key,
                 "owner_username": owner_username,
                 "knowledge_base": knowledge_base
@@ -221,5 +300,9 @@ async def upload_file(
         "chunks": len(chunks),
         "scope_key": scope_key,
         "knowledge_base": knowledge_base,
-        "owner_username": owner_username
+        "owner_username": owner_username,
+        "title": title,
+        "document_date": detected_date,
+        "document_type": document_type,
+        "uploaded_at": uploaded_at,
     }

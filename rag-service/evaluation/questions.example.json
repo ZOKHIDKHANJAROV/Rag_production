@@ -1,0 +1,10 @@
+[
+  {
+    "id": "replace-with-real-case",
+    "question": "Replace this with a real question from your knowledge base.",
+    "scope_keys": ["global"],
+    "expected_sources": ["exact-filename-or-document-id"],
+    "expected_answer_contains": ["expected fact"],
+    "expect_answerable": true
+  }
+]

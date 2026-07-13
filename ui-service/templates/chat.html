@@ -87,6 +87,7 @@
                 <div class="admin-tabs">
                     <button id="admin-tab-users" class="admin-tab active" onclick="setAdminTab('users')">Пользователи</button>
                     <button id="admin-tab-databases" class="admin-tab" onclick="setAdminTab('databases')">Базы знаний</button>
+                    <button id="admin-tab-feedback" class="admin-tab" onclick="setAdminTab('feedback')">Обратная связь</button>
                 </div>
 
                 <div id="admin-users-view" class="admin-view">
@@ -116,6 +117,17 @@
                             <div id="admin-documents-list" class="admin-table"></div>
                         </div>
                     </div>
+                </div>
+
+                <div id="admin-feedback-view" class="admin-view hidden">
+                    <div class="admin-docs-header">
+                        <h3>Отрицательная обратная связь</h3>
+                        <div class="admin-feedback-actions">
+                            <button class="admin-light-btn" onclick="loadAdminFeedback()">Обновить</button>
+                            <button class="admin-light-btn" onclick="downloadEvaluationCandidates()">Экспорт выбранных</button>
+                        </div>
+                    </div>
+                    <div id="admin-feedback-list" class="admin-table"></div>
                 </div>
             </section>
             {% endif %}
@@ -228,6 +240,7 @@
             if (CAN_MANAGE_ADMIN) {
                 loadAdminUsers();
                 loadAdminDatabases();
+                loadAdminFeedback();
             }
             setInterval(() => loadSessions(), 30000);
             if (CAN_VIEW_SERVICES) {
@@ -508,6 +521,7 @@
                             renderChat();
                         } else if (event.type === 'done') {
                             answerMessage.sources = event.sources || answerMessage.sources || [];
+                            answerMessage.answer_id = event.answer_id || answerMessage.answer_id;
                         } else if (event.type === 'error') {
                             throw new Error(event.error || 'Streaming answer failed');
                         }
@@ -518,6 +532,7 @@
                     const event = JSON.parse(buffer);
                     if (event.type === 'done') {
                         answerMessage.sources = event.sources || answerMessage.sources || [];
+                        answerMessage.answer_id = event.answer_id || answerMessage.answer_id;
                     }
                 }
 
@@ -577,7 +592,88 @@
                 return `<div class="${classes}">${contentHtml}</div>`;
             }).join('');
 
+            const answerMessages = chatMessages.filter((message) => message.type === 'answer');
+            container.querySelectorAll('.message-answer .message-content').forEach((element, index) => {
+                const message = answerMessages[index];
+                element.innerHTML = `${
+                    message.content ? renderAnswerWithCitations(message) : 'РћР±СЂР°Р±РѕС‚РєР°...'
+                }${renderAnswerActions(message)}`;
+            });
+
             container.scrollTop = container.scrollHeight;
+        }
+
+        function sourceLabel(source) {
+            return String(source.filename || source.title || source.document_id || '').trim();
+        }
+
+        function renderAnswerWithCitations(message) {
+            const citationPattern = /\[([^\]\n]{1,160})\]/g;
+            const content = message.content || '';
+            let cursor = 0;
+            let html = '';
+            let match;
+
+            while ((match = citationPattern.exec(content)) !== null) {
+                html += escapeHtml(content.slice(cursor, match.index));
+                const sourceIndex = (message.sources || []).findIndex(
+                    (source) => sourceLabel(source).toLowerCase() === match[1].trim().toLowerCase()
+                );
+                if (sourceIndex >= 0) {
+                    html += `<button class="citation-link" onclick="showAnswerSource('${message.timestamp}', ${sourceIndex})">${escapeHtml(match[0])}</button>`;
+                } else {
+                    html += escapeHtml(match[0]);
+                }
+                cursor = citationPattern.lastIndex;
+            }
+
+            return html + escapeHtml(content.slice(cursor));
+        }
+
+        function renderAnswerActions(message) {
+            const sourceButton = message.sources && message.sources.length > 0
+                ? `<button class="sources-note" onclick="showMessageSources('${message.timestamp}')">${message.sources.length} sources</button>`
+                : '';
+            if (!message.answer_id) {
+                return sourceButton;
+            }
+
+            const helpfulActive = message.feedback === true ? ' active' : '';
+            const notHelpfulActive = message.feedback === false ? ' active' : '';
+            return `${sourceButton}
+                <span class="feedback-controls" aria-label="Answer feedback">
+                    <button class="feedback-btn${helpfulActive}" onclick="submitFeedback('${message.answer_id}', true)" title="Helpful" aria-label="Helpful">+</button>
+                    <button class="feedback-btn${notHelpfulActive}" onclick="submitFeedback('${message.answer_id}', false)" title="Not helpful" aria-label="Not helpful">-</button>
+                </span>`;
+        }
+
+        async function submitFeedback(answerId, helpful) {
+            if (!answerId || !currentSessionId) return;
+
+            try {
+                const response = await apiFetch(`${API_BASE}/api/feedback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        answer_id: answerId,
+                        helpful
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Feedback request failed');
+                }
+
+                const message = chatMessages.find((item) => item.answer_id === answerId);
+                if (message) {
+                    message.feedback = helpful;
+                    renderChat();
+                }
+            } catch (error) {
+                console.error('Feedback error:', error);
+                showToast('Feedback was not saved', 'error');
+            }
         }
 
         function showSources(sources) {
@@ -604,6 +700,12 @@
         function showMessageSources(timestamp) {
             const message = chatMessages.find((item) => item.timestamp === timestamp);
             showSources(message ? message.sources : []);
+        }
+
+        function showAnswerSource(timestamp, sourceIndex) {
+            const message = chatMessages.find((item) => item.timestamp === timestamp);
+            const source = message && (message.sources || [])[sourceIndex];
+            showSources(source ? [source] : []);
         }
 
         function closeSources() {
@@ -645,14 +747,18 @@
             if (!panel.classList.contains('hidden')) {
                 loadAdminUsers();
                 loadAdminDatabases();
+                loadAdminFeedback();
             }
         }
 
         function setAdminTab(tab) {
             document.getElementById('admin-tab-users').classList.toggle('active', tab === 'users');
             document.getElementById('admin-tab-databases').classList.toggle('active', tab === 'databases');
+            document.getElementById('admin-tab-feedback').classList.toggle('active', tab === 'feedback');
             document.getElementById('admin-users-view').classList.toggle('hidden', tab !== 'users');
             document.getElementById('admin-databases-view').classList.toggle('hidden', tab !== 'databases');
+            document.getElementById('admin-feedback-view').classList.toggle('hidden', tab !== 'feedback');
+            if (tab === 'feedback') loadAdminFeedback();
         }
 
         async function loadAdminUsers() {
@@ -801,6 +907,72 @@
                     </div>
                 </div>
             `).join('');
+        }
+
+        async function loadAdminFeedback() {
+            if (!CAN_MANAGE_ADMIN) return;
+            const response = await apiFetch(`${API_BASE}/api/admin/feedback?helpful=false&limit=100`);
+            if (!response.ok) return;
+            const data = await response.json();
+            renderAdminFeedback(data.feedback || []);
+        }
+
+        function renderAdminFeedback(feedback) {
+            const container = document.getElementById('admin-feedback-list');
+            if (!container) return;
+
+            if (!feedback.length) {
+                container.innerHTML = '<div class="admin-empty">No negative feedback yet</div>';
+                return;
+            }
+
+            container.innerHTML = feedback.map((item) => `
+                <div class="admin-row admin-feedback-row">
+                    <div>
+                        <strong>${escapeHtml(item.question)}</strong>
+                        <span>${escapeHtml(item.answer)} </span>
+                        <span>${(item.sources || []).map((source) => escapeHtml(source.filename || source.document_id)).join(', ')}</span>
+                    </div>
+                    <label class="admin-feedback-select" title="Add to evaluation dataset">
+                        <input type="checkbox" ${item.selected_for_evaluation ? 'checked' : ''}
+                            onchange="setFeedbackEvaluation(${item.id}, this.checked)">
+                        <span>Evaluation</span>
+                    </label>
+                </div>
+            `).join('');
+        }
+
+        async function setFeedbackEvaluation(feedbackId, selected) {
+            const response = await apiFetch(`${API_BASE}/api/admin/feedback/${feedbackId}/evaluation`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ selected_for_evaluation: selected })
+            });
+
+            if (!response.ok) {
+                showToast('Feedback selection was not saved', 'error');
+                loadAdminFeedback();
+                return;
+            }
+
+            showToast(selected ? 'Added to evaluation candidates' : 'Removed from evaluation candidates', 'success');
+        }
+
+        async function downloadEvaluationCandidates() {
+            const response = await apiFetch(`${API_BASE}/api/admin/feedback/evaluation-candidates?limit=200`);
+            if (!response.ok) {
+                showToast('Evaluation export failed', 'error');
+                return;
+            }
+
+            const data = await response.json();
+            const blob = new Blob([JSON.stringify(data.cases || [], null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'questions.candidates.json';
+            link.click();
+            URL.revokeObjectURL(url);
         }
 
         async function deleteAdminDocument(documentId, scopeKey) {

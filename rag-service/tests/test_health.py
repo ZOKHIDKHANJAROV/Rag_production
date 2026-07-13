@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 RAG_ROOT = ROOT / "rag-service"
 RAG_MAIN_PATH = RAG_ROOT / "app" / "main.py"
 RAG_MODULE = None
+EVALUATE_PATH = RAG_ROOT / "evaluation" / "evaluate.py"
+EVALUATE_MODULE = None
 
 
 def load_rag_module():
@@ -34,12 +36,41 @@ def load_rag_module():
     return module
 
 
+def load_evaluate_module():
+    global EVALUATE_MODULE
+    if EVALUATE_MODULE is not None:
+        return EVALUATE_MODULE
+
+    module_name = f"rag_evaluate_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, EVALUATE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    EVALUATE_MODULE = module
+    return module
+
+
 class StubRedis:
     async def ping(self):
         return True
 
     async def aclose(self):
         return None
+
+
+class CacheRedis:
+    def __init__(self):
+        self.values = {}
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def setex(self, key, _ttl, value):
+        self.values[key] = value
+
+    async def delete(self, key):
+        self.values.pop(key, None)
 
 
 class StubResponse:
@@ -115,6 +146,30 @@ def test_cache_key_changes_with_conversation_history():
     assert empty_history_key != contextual_history_key
 
 
+def test_semantic_cache_preserves_sources_for_citations():
+    rag_main = load_rag_module()
+    rag_main.redis_client = CacheRedis()
+    sources = [{"filename": "policy.pdf", "text": "Deadline is Friday."}]
+
+    asyncio.run(
+        rag_main.save_semantic_cache(
+            "What is the deadline?",
+            "The deadline is Friday. [policy.pdf]",
+            sources,
+            ["global"],
+            [],
+        )
+    )
+    cached = asyncio.run(
+        rag_main.check_semantic_cache("What is the deadline?", ["global"], [])
+    )
+
+    assert cached == {
+        "answer": "The deadline is Friday. [policy.pdf]",
+        "sources": sources,
+    }
+
+
 def test_fuse_search_results_rewards_agreement_between_queries():
     rag_main = load_rag_module()
     results = [
@@ -178,3 +233,72 @@ def test_trim_context_skips_an_oversized_chunk():
         rag_main.MAX_CONTEXT_CHARS = original_limit
 
     assert contexts == ["short", "tiny"]
+
+
+def test_metadata_boost_and_context_labels_use_document_fields():
+    rag_main = load_rag_module()
+    result = {
+        "filename": "safety-policy.pdf",
+        "title": "Safety policy",
+        "section": "Helmet requirements",
+        "document_id": "doc-1",
+        "text": "Employees must wear a helmet.",
+    }
+
+    score = rag_main.metadata_score("helmet policy", result)
+    contexts = rag_main.build_context_blocks([result])
+
+    assert score > 0
+    assert contexts == ["[safety-policy.pdf]\nEmployees must wear a helmet."]
+
+
+def test_evaluation_reports_source_and_answer_match():
+    evaluate = load_evaluate_module()
+    case = {
+        "id": "policy-deadline",
+        "expected_sources": ["policy.pdf"],
+        "expected_answer_contains": ["Friday"],
+    }
+    payload = {
+        "answer": "The deadline is Friday.",
+        "sources": [
+            {"document_id": "doc-1", "filename": "policy.pdf"},
+            {"document_id": "doc-2", "filename": "archive.pdf"},
+        ],
+    }
+
+    result = evaluate.evaluate_response(case, payload, 42.0, 3)
+
+    assert result["source_hit"] is True
+    assert result["answer_match"] is True
+    assert result["source_backed"] is True
+
+
+def test_evaluation_report_calculates_metrics():
+    evaluate = load_evaluate_module()
+    report = evaluate.build_report([
+        {
+            "id": "one",
+            "latency_ms": 10.0,
+            "source_hit": True,
+            "answer_match": True,
+            "refusal_correct": None,
+            "source_backed": True,
+            "source_count": 1,
+        },
+        {
+            "id": "two",
+            "latency_ms": 30.0,
+            "source_hit": False,
+            "answer_match": False,
+            "refusal_correct": True,
+            "source_backed": False,
+            "source_count": 0,
+        },
+    ], 0)
+
+    assert report["source_hit_at_k"] == 0.5
+    assert report["answer_keyword_match_rate"] == 0.5
+    assert report["refusal_accuracy"] == 1.0
+    assert report["source_backed_answer_rate"] == 0.5
+    assert report["latency_ms"]["p95"] == 29.0
