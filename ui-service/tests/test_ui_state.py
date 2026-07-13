@@ -342,6 +342,15 @@ def test_session_owner_is_enforced(monkeypatch, tmp_path):
         assert forbidden.status_code == 403
 
 
+def test_voice_tts_segments_wait_for_sentence_end(monkeypatch, tmp_path):
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+
+    segments, remainder = ui_main.split_voice_tts_segments("First sentence. Incomplete")
+
+    assert segments == ["First sentence."]
+    assert remainder == "Incomplete"
+
+
 def test_revoked_auth_session_blocks_access(monkeypatch, tmp_path):
     monkeypatch.delenv("BOOTSTRAP_ADMIN_USERNAME", raising=False)
     monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)
