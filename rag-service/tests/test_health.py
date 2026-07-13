@@ -59,6 +59,20 @@ class StubRedis:
         return None
 
 
+class CacheRedis:
+    def __init__(self):
+        self.values = {}
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def setex(self, key, _ttl, value):
+        self.values[key] = value
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+
+
 class StubResponse:
     def __init__(self, status_code=200):
         self.status_code = status_code
@@ -132,6 +146,30 @@ def test_cache_key_changes_with_conversation_history():
     assert empty_history_key != contextual_history_key
 
 
+def test_semantic_cache_preserves_sources_for_citations():
+    rag_main = load_rag_module()
+    rag_main.redis_client = CacheRedis()
+    sources = [{"filename": "policy.pdf", "text": "Deadline is Friday."}]
+
+    asyncio.run(
+        rag_main.save_semantic_cache(
+            "What is the deadline?",
+            "The deadline is Friday. [policy.pdf]",
+            sources,
+            ["global"],
+            [],
+        )
+    )
+    cached = asyncio.run(
+        rag_main.check_semantic_cache("What is the deadline?", ["global"], [])
+    )
+
+    assert cached == {
+        "answer": "The deadline is Friday. [policy.pdf]",
+        "sources": sources,
+    }
+
+
 def test_fuse_search_results_rewards_agreement_between_queries():
     rag_main = load_rag_module()
     results = [
@@ -195,6 +233,23 @@ def test_trim_context_skips_an_oversized_chunk():
         rag_main.MAX_CONTEXT_CHARS = original_limit
 
     assert contexts == ["short", "tiny"]
+
+
+def test_metadata_boost_and_context_labels_use_document_fields():
+    rag_main = load_rag_module()
+    result = {
+        "filename": "safety-policy.pdf",
+        "title": "Safety policy",
+        "section": "Helmet requirements",
+        "document_id": "doc-1",
+        "text": "Employees must wear a helmet.",
+    }
+
+    score = rag_main.metadata_score("helmet policy", result)
+    contexts = rag_main.build_context_blocks([result])
+
+    assert score > 0
+    assert contexts == ["[safety-policy.pdf]\nEmployees must wear a helmet."]
 
 
 def test_evaluation_reports_source_and_answer_match():

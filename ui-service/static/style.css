@@ -987,6 +987,43 @@ html[data-theme="dark"] .empty-logo {
   font-weight: 800;
 }
 
+.citation-link {
+  margin: 0 2px;
+  padding: 1px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--gold-strong);
+  background: transparent;
+  color: var(--gold-strong);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.feedback-controls {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.feedback-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.feedback-btn:hover,
+.feedback-btn.active {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  color: var(--gold-strong);
+}
+
 .sources-panel {
   max-height: 310px;
   padding: 16px 24px;

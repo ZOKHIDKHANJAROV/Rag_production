@@ -167,6 +167,12 @@ class AdminUserCreate(BaseModel):
     role: str = ROLE_USER
 
 
+class FeedbackRequest(BaseModel):
+    session_id: str
+    answer_id: str
+    helpful: bool
+
+
 def normalize_role(role: str) -> str:
     normalized = (role or ROLE_USER).strip().lower()
     if normalized not in KNOWN_ROLES:
@@ -273,6 +279,26 @@ async def init_postgres_schema():
 
         CREATE INDEX IF NOT EXISTS admin_audit_logs_created_at_idx
         ON admin_audit_logs (created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS rag_feedback (
+            id BIGSERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            answer_id TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+            helpful BOOLEAN NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (username, answer_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS rag_feedback_created_at_idx
+        ON rag_feedback (created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS rag_feedback_helpful_idx
+        ON rag_feedback (helpful, created_at DESC);
         """
     )
 
@@ -410,6 +436,79 @@ async def list_admin_audit_logs(limit: int = 50):
             "target_id": row["target_id"],
             "details": dict(row["details"] or {}),
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+        for row in rows
+    ]
+
+
+async def save_rag_feedback(
+    username: str,
+    session_id: str,
+    answer_id: str,
+    question: str,
+    answer: str,
+    sources: List[Dict],
+    helpful: bool,
+):
+    await ensure_db_ready().execute(
+        """
+        INSERT INTO rag_feedback (
+            username, session_id, answer_id, question, answer, sources, helpful
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+        ON CONFLICT (username, answer_id)
+        DO UPDATE SET
+            helpful = EXCLUDED.helpful,
+            updated_at = NOW()
+        """,
+        username,
+        session_id,
+        answer_id,
+        question,
+        answer,
+        json.dumps(sources, ensure_ascii=False),
+        helpful,
+    )
+
+
+async def list_rag_feedback(limit: int = 100, helpful: bool | None = None):
+    if helpful is None:
+        rows = await ensure_db_ready().fetch(
+            """
+            SELECT id, username, session_id, answer_id, question, answer, sources,
+                   helpful, created_at, updated_at
+            FROM rag_feedback
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            max(1, min(limit, 500)),
+        )
+    else:
+        rows = await ensure_db_ready().fetch(
+            """
+            SELECT id, username, session_id, answer_id, question, answer, sources,
+                   helpful, created_at, updated_at
+            FROM rag_feedback
+            WHERE helpful = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            helpful,
+            max(1, min(limit, 500)),
+        )
+
+    return [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "session_id": row["session_id"],
+            "answer_id": row["answer_id"],
+            "question": row["question"],
+            "answer": row["answer"],
+            "sources": list(row["sources"] or []),
+            "helpful": row["helpful"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
         }
         for row in rows
     ]
@@ -770,6 +869,22 @@ def split_documents_by_visibility(documents: List[Dict]):
     global_documents = [document for document in normalized if document["scope_key"] == "global"]
     personal_documents = [document for document in normalized if document["scope_key"] != "global"]
     return normalized, global_documents, personal_documents
+
+
+def feedback_target_from_history(history: List[Dict], answer_id: str):
+    for index, item in enumerate(history):
+        if item.get("type") != "answer" or item.get("answer_id") != answer_id:
+            continue
+
+        for previous in reversed(history[:index]):
+            if previous.get("type") == "question":
+                return {
+                    "question": previous.get("content", ""),
+                    "answer": item.get("content", ""),
+                    "sources": item.get("sources", []),
+                }
+        return None
+    return None
 
 
 def client_identifier(request: Request):
@@ -1428,6 +1543,7 @@ async def ask(
 
         response.raise_for_status()
         result = response.json()
+        answer_id = str(uuid.uuid4())
 
         # Store in session history
         session["history"].append({
@@ -1438,6 +1554,7 @@ async def ask(
         
         session["history"].append({
             "type": "answer",
+            "answer_id": answer_id,
             "content": result.get("answer"),
             "sources": result.get("sources", []),
             "timestamp": datetime.now().isoformat()
@@ -1450,6 +1567,7 @@ async def ask(
 
         return JSONResponse(content={
             **result,
+            "answer_id": answer_id,
             "session_id": session_id,
             "timestamp": datetime.now().isoformat()
         })
@@ -1517,6 +1635,7 @@ async def ask_stream(
         async def stream():
             answer_parts = []
             sources = []
+            answer_id = str(uuid.uuid4())
 
             yield json.dumps({
                 "type": "session",
@@ -1545,6 +1664,9 @@ async def ask_stream(
                     if data.get("type") in {"sources", "done"}:
                         sources = data.get("sources", sources)
 
+                    if data.get("type") == "done":
+                        data["answer_id"] = answer_id
+
                     yield json.dumps(data, ensure_ascii=False) + "\n"
 
             answer = "".join(answer_parts)
@@ -1557,6 +1679,7 @@ async def ask_stream(
 
             session["history"].append({
                 "type": "answer",
+                "answer_id": answer_id,
                 "content": answer,
                 "sources": sources,
                 "timestamp": datetime.now().isoformat()
@@ -1586,6 +1709,39 @@ async def ask_stream(
             status_code=500,
             detail="Internal server error"
         )
+
+
+@app.post("/api/feedback")
+async def submit_feedback(request: Request, feedback: FeedbackRequest):
+    user = await get_current_user(request)
+    session = await require_session_owner(feedback.session_id, user)
+    target = feedback_target_from_history(session.get("history", []), feedback.answer_id)
+
+    if target is None:
+        raise HTTPException(status_code=404, detail="Answer not found in this session")
+
+    await save_rag_feedback(
+        user["username"],
+        feedback.session_id,
+        feedback.answer_id,
+        target["question"],
+        target["answer"],
+        target["sources"],
+        feedback.helpful,
+    )
+
+    for item in session.get("history", []):
+        if item.get("type") == "answer" and item.get("answer_id") == feedback.answer_id:
+            item["feedback"] = feedback.helpful
+            break
+    await save_session_state(feedback.session_id, session)
+
+    return {
+        "status": "saved",
+        "answer_id": feedback.answer_id,
+        "helpful": feedback.helpful,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 # =========================
 # FILE UPLOAD
@@ -2043,6 +2199,17 @@ async def admin_audit_logs(request: Request, limit: int = 50):
     return {
         "logs": await list_admin_audit_logs(limit=limit),
         "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/api/admin/feedback")
+async def admin_feedback(request: Request, limit: int = 100, helpful: bool | None = None):
+    user = await get_current_user(request)
+    require_permission(user, "manage_users")
+
+    return {
+        "feedback": await list_rag_feedback(limit=limit, helpful=helpful),
+        "timestamp": datetime.now().isoformat(),
     }
 
 

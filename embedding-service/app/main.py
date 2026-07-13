@@ -62,6 +62,11 @@ class IndexRequest(BaseModel):
     texts: List[str]
     document_id: Optional[str] = None
     filename: Optional[str] = None
+    title: Optional[str] = None
+    sections: Optional[List[str]] = None
+    document_date: Optional[str] = None
+    document_type: Optional[str] = None
+    uploaded_at: Optional[str] = None
     scope_key: str = "global"
     owner_username: Optional[str] = None
     knowledge_base: str = "global"
@@ -200,6 +205,10 @@ def list_documents(scope_key: Optional[str] = None, owner_username: Optional[str
         point_scope = normalize_scope_key(point.payload.get("scope_key"))
 
         docs[doc_id]["filename"] = filename
+        docs[doc_id]["title"] = point.payload.get("title")
+        docs[doc_id]["document_date"] = point.payload.get("document_date")
+        docs[doc_id]["document_type"] = point.payload.get("document_type")
+        docs[doc_id]["uploaded_at"] = point.payload.get("uploaded_at")
         docs[doc_id]["chunks"] += 1
         docs[doc_id]["scope_key"] = point_scope
         docs[doc_id]["owner_username"] = point.payload.get("owner_username")
@@ -209,6 +218,10 @@ def list_documents(scope_key: Optional[str] = None, owner_username: Optional[str
         {
             "document_id": doc_id,
             "filename": data["filename"],
+            "title": data["title"],
+            "document_date": data["document_date"],
+            "document_type": data["document_type"],
+            "uploaded_at": data["uploaded_at"],
             "chunks": data["chunks"],
             "scope_key": data["scope_key"],
             "owner_username": data["owner_username"],
@@ -256,7 +269,7 @@ async def index(req: IndexRequest):
 
     points = []
 
-    for text, vector in zip(req.texts, vectors):
+    for index, (text, vector) in enumerate(zip(req.texts, vectors)):
 
         # 🔥 UUID вместо строки
         point_id = str(uuid.uuid4())
@@ -268,6 +281,11 @@ async def index(req: IndexRequest):
                 "text": text,
                 "document_id": req.document_id,
                 "filename": req.filename,
+                "title": req.title,
+                "section": req.sections[index] if req.sections and index < len(req.sections) else None,
+                "document_date": req.document_date,
+                "document_type": req.document_type,
+                "uploaded_at": req.uploaded_at,
                 "scope_key": scope,
                 "owner_username": req.owner_username,
                 "knowledge_base": req.knowledge_base
@@ -343,6 +361,11 @@ async def search(req: SearchRequest):
                 "score": point.score,
                 "document_id": point.payload.get("document_id"),
                 "filename": point.payload.get("filename"),
+                "title": point.payload.get("title"),
+                "section": point.payload.get("section"),
+                "document_date": point.payload.get("document_date"),
+                "document_type": point.payload.get("document_type"),
+                "uploaded_at": point.payload.get("uploaded_at"),
                 "scope_key": normalize_scope_key(point.payload.get("scope_key")),
                 "owner_username": point.payload.get("owner_username"),
                 "knowledge_base": point.payload.get("knowledge_base", "global")

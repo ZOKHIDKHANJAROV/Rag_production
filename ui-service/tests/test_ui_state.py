@@ -94,6 +94,7 @@ class StubDbPool:
     def __init__(self):
         self.users = {}
         self.audit_logs = []
+        self.feedback = []
 
     def _user_row(self, username):
         user = self.users.get(username)
@@ -156,6 +157,35 @@ class StubDbPool:
                     "created_at": now,
                 }
             )
+            return "INSERT 0 1"
+
+        if "INSERT INTO rag_feedback" in compact:
+            username, session_id, answer_id, question, answer, sources, helpful = args
+            existing = next(
+                (
+                    item for item in self.feedback
+                    if item["username"] == username and item["answer_id"] == answer_id
+                ),
+                None,
+            )
+            if existing:
+                existing["helpful"] = helpful
+                existing["updated_at"] = now
+            else:
+                self.feedback.append(
+                    {
+                        "id": len(self.feedback) + 1,
+                        "username": username,
+                        "session_id": session_id,
+                        "answer_id": answer_id,
+                        "question": question,
+                        "answer": answer,
+                        "sources": json.loads(sources),
+                        "helpful": helpful,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
             return "INSERT 0 1"
 
         raise AssertionError(f"Unexpected execute query: {compact}")
@@ -367,3 +397,66 @@ def test_health_checks_postgres_redis_and_rag(monkeypatch, tmp_path):
         "postgres": "ok",
         "rag": "ok",
     }
+
+
+def test_feedback_target_uses_the_answer_and_preceding_question(monkeypatch, tmp_path):
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+    history = [
+        {"type": "question", "content": "What is the deadline?"},
+        {
+            "type": "answer",
+            "answer_id": "answer-1",
+            "content": "Friday.",
+            "sources": [{"filename": "policy.pdf"}],
+        },
+    ]
+
+    target = ui_main.feedback_target_from_history(history, "answer-1")
+
+    assert target == {
+        "question": "What is the deadline?",
+        "answer": "Friday.",
+        "sources": [{"filename": "policy.pdf"}],
+    }
+    assert ui_main.feedback_target_from_history(history, "missing") is None
+
+
+def test_feedback_api_persists_a_session_owned_answer(monkeypatch, tmp_path):
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+    asyncio.run(
+        ui_main.create_user_record(
+            "alice",
+            ui_main.hash_password("alice-pass"),
+            ui_main.ROLE_USER,
+        )
+    )
+    user = asyncio.run(ui_main.fetch_user_record("alice"))
+    token = asyncio.run(ui_main.issue_auth_tokens("alice", user))["access_token"]
+    session_id, session = asyncio.run(ui_main.create_session_state("alice"))
+    session["history"] = [
+        {"type": "question", "content": "What is the deadline?"},
+        {
+            "type": "answer",
+            "answer_id": "answer-1",
+            "content": "Friday.",
+            "sources": [{"filename": "policy.pdf"}],
+        },
+    ]
+    asyncio.run(ui_main.save_session_state(session_id, session))
+
+    with TestClient(ui_main.app) as client:
+        client.cookies.set(ui_main.ACCESS_COOKIE_NAME, token)
+        response = client.post(
+            "/api/feedback",
+            json={
+                "session_id": session_id,
+                "answer_id": "answer-1",
+                "helpful": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert ui_main.db_pool.feedback[0]["question"] == "What is the deadline?"
+    assert ui_main.db_pool.feedback[0]["sources"] == [{"filename": "policy.pdf"}]
+    saved_session = asyncio.run(ui_main.load_session_state(session_id))
+    assert saved_session["history"][1]["feedback"] is False

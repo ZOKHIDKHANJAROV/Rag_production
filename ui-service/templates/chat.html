@@ -508,6 +508,7 @@
                             renderChat();
                         } else if (event.type === 'done') {
                             answerMessage.sources = event.sources || answerMessage.sources || [];
+                            answerMessage.answer_id = event.answer_id || answerMessage.answer_id;
                         } else if (event.type === 'error') {
                             throw new Error(event.error || 'Streaming answer failed');
                         }
@@ -518,6 +519,7 @@
                     const event = JSON.parse(buffer);
                     if (event.type === 'done') {
                         answerMessage.sources = event.sources || answerMessage.sources || [];
+                        answerMessage.answer_id = event.answer_id || answerMessage.answer_id;
                     }
                 }
 
@@ -577,7 +579,88 @@
                 return `<div class="${classes}">${contentHtml}</div>`;
             }).join('');
 
+            const answerMessages = chatMessages.filter((message) => message.type === 'answer');
+            container.querySelectorAll('.message-answer .message-content').forEach((element, index) => {
+                const message = answerMessages[index];
+                element.innerHTML = `${
+                    message.content ? renderAnswerWithCitations(message) : 'РћР±СЂР°Р±РѕС‚РєР°...'
+                }${renderAnswerActions(message)}`;
+            });
+
             container.scrollTop = container.scrollHeight;
+        }
+
+        function sourceLabel(source) {
+            return String(source.filename || source.title || source.document_id || '').trim();
+        }
+
+        function renderAnswerWithCitations(message) {
+            const citationPattern = /\[([^\]\n]{1,160})\]/g;
+            const content = message.content || '';
+            let cursor = 0;
+            let html = '';
+            let match;
+
+            while ((match = citationPattern.exec(content)) !== null) {
+                html += escapeHtml(content.slice(cursor, match.index));
+                const sourceIndex = (message.sources || []).findIndex(
+                    (source) => sourceLabel(source).toLowerCase() === match[1].trim().toLowerCase()
+                );
+                if (sourceIndex >= 0) {
+                    html += `<button class="citation-link" onclick="showAnswerSource('${message.timestamp}', ${sourceIndex})">${escapeHtml(match[0])}</button>`;
+                } else {
+                    html += escapeHtml(match[0]);
+                }
+                cursor = citationPattern.lastIndex;
+            }
+
+            return html + escapeHtml(content.slice(cursor));
+        }
+
+        function renderAnswerActions(message) {
+            const sourceButton = message.sources && message.sources.length > 0
+                ? `<button class="sources-note" onclick="showMessageSources('${message.timestamp}')">${message.sources.length} sources</button>`
+                : '';
+            if (!message.answer_id) {
+                return sourceButton;
+            }
+
+            const helpfulActive = message.feedback === true ? ' active' : '';
+            const notHelpfulActive = message.feedback === false ? ' active' : '';
+            return `${sourceButton}
+                <span class="feedback-controls" aria-label="Answer feedback">
+                    <button class="feedback-btn${helpfulActive}" onclick="submitFeedback('${message.answer_id}', true)" title="Helpful" aria-label="Helpful">+</button>
+                    <button class="feedback-btn${notHelpfulActive}" onclick="submitFeedback('${message.answer_id}', false)" title="Not helpful" aria-label="Not helpful">-</button>
+                </span>`;
+        }
+
+        async function submitFeedback(answerId, helpful) {
+            if (!answerId || !currentSessionId) return;
+
+            try {
+                const response = await apiFetch(`${API_BASE}/api/feedback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        answer_id: answerId,
+                        helpful
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Feedback request failed');
+                }
+
+                const message = chatMessages.find((item) => item.answer_id === answerId);
+                if (message) {
+                    message.feedback = helpful;
+                    renderChat();
+                }
+            } catch (error) {
+                console.error('Feedback error:', error);
+                showToast('Feedback was not saved', 'error');
+            }
         }
 
         function showSources(sources) {
@@ -604,6 +687,12 @@
         function showMessageSources(timestamp) {
             const message = chatMessages.find((item) => item.timestamp === timestamp);
             showSources(message ? message.sources : []);
+        }
+
+        function showAnswerSource(timestamp, sourceIndex) {
+            const message = chatMessages.find((item) => item.timestamp === timestamp);
+            const source = message && (message.sources || [])[sourceIndex];
+            showSources(source ? [source] : []);
         }
 
         function closeSources() {

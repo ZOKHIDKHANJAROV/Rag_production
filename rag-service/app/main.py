@@ -56,6 +56,10 @@ LLM_UNAVAILABLE_MESSAGE = (
     "LLM service is unavailable or the requested Ollama model is not installed. "
     "Relevant sources were found, but generation cannot be completed yet."
 )
+CITATION_INSTRUCTION = (
+    "For every factual claim, cite the supporting source exactly as [filename]. "
+    "Use only source labels present below and never invent citations."
+)
 
 # ---------------------------
 # Redis session memory
@@ -259,19 +263,30 @@ async def check_semantic_cache(question, scope_keys, history):
     cached = await redis_client.get(cache_key)
 
     if cached:
-        if is_negative_or_empty_answer(cached):
+        try:
+            cached_payload = json.loads(cached)
+            if not isinstance(cached_payload, dict):
+                raise ValueError("cache payload is not an object")
+        except (json.JSONDecodeError, ValueError):
+            cached_payload = {"answer": cached, "sources": []}
+
+        answer = cached_payload.get("answer", "")
+        if is_negative_or_empty_answer(answer):
             logging.info({"event": "rag_cache_negative_ignored"})
             await redis_client.delete(cache_key)
             return None
 
         logging.info({"event": "rag_cache_hit"})
-        return cached
+        return {
+            "answer": answer,
+            "sources": cached_payload.get("sources", []),
+        }
 
     logging.info({"event": "rag_cache_miss"})
     return None
 
 
-async def save_semantic_cache(question, answer, scope_keys, history):
+async def save_semantic_cache(question, answer, sources, scope_keys, history):
     if is_negative_or_empty_answer(answer):
         logging.info({"event": "rag_cache_negative_skipped"})
         return
@@ -279,7 +294,7 @@ async def save_semantic_cache(question, answer, scope_keys, history):
     await redis_client.setex(
         build_rag_cache_key(question, scope_keys, history),
         RAG_CACHE_TTL,
-        answer
+        json.dumps({"answer": answer, "sources": sources}, ensure_ascii=False)
     )
 
 # ---------------------------
@@ -313,6 +328,30 @@ def keyword_score(query, text):
         return 0
 
     return len(words & text_words) / len(words)
+
+
+def metadata_score(question, result):
+    title = result.get("title") or ""
+    section = result.get("section") or ""
+    filename = result.get("filename") or ""
+
+    return (
+        0.6 * keyword_score(question, title)
+        + 0.25 * keyword_score(question, section)
+        + 0.15 * keyword_score(question, filename)
+    )
+
+
+def source_label(result):
+    label = result.get("filename") or result.get("title") or result.get("document_id") or "source"
+    return re.sub(r"[\[\]\r\n]+", " ", str(label)).strip()[:160] or "source"
+
+
+def build_context_blocks(results):
+    return [
+        f"[{source_label(result)}]\n{result['text']}"
+        for result in results
+    ]
 
 # ---------------------------
 # Reranker
@@ -349,8 +388,11 @@ def rank_documents(question, results):
 
     for result in ranked:
         result["keyword_score"] = keyword_score(question, result["text"])
+        result["metadata_score"] = metadata_score(question, result)
         result["hybrid_score"] = (
-            0.7 * result["score"] + 0.3 * result["keyword_score"]
+            0.65 * result["score"]
+            + 0.25 * result["keyword_score"]
+            + 0.1 * result["metadata_score"]
         )
 
     ranked = [
@@ -590,8 +632,8 @@ async def ask(req: AskRequest):
         if cached_answer:
 
             return {
-                "answer": cached_answer,
-                "sources": [],
+                "answer": cached_answer["answer"],
+                "sources": cached_answer["sources"],
                 "cached": True
             }
 
@@ -662,7 +704,7 @@ async def ask(req: AskRequest):
         )
         reranked = reranked[:RAG_FINAL_TOP_K]
 
-        contexts = [r["text"] for r in reranked]
+        contexts = build_context_blocks(reranked)
 
         # ---------------------------
         # Compression
@@ -688,7 +730,7 @@ async def ask(req: AskRequest):
                 "sources": []
             }
 
-        context_text = "\n\n".join(contexts)
+        context_text = f"{CITATION_INSTRUCTION}\n\n" + "\n\n".join(contexts)
 
         # ---------------------------
         # Prompt
@@ -823,7 +865,7 @@ async def ask(req: AskRequest):
     # Save semantic cache
     # ---------------------------
 
-    await save_semantic_cache(req.question, answer, scope_keys, cache_history)
+    await save_semantic_cache(req.question, answer, reranked, scope_keys, cache_history)
 
     return {
         "answer": answer,
@@ -858,8 +900,8 @@ async def ask_stream(req: AskRequest):
         )
 
         if cached_answer:
-            yield await event({"type": "delta", "text": cached_answer, "cached": True})
-            yield await event({"type": "done", "sources": [], "cached": True})
+            yield await event({"type": "delta", "text": cached_answer["answer"], "cached": True})
+            yield await event({"type": "done", "sources": cached_answer["sources"], "cached": True})
             RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
             return
 
@@ -900,7 +942,7 @@ async def ask_stream(req: AskRequest):
         )
         reranked = reranked[:RAG_FINAL_TOP_K]
 
-        contexts = [r["text"] for r in reranked]
+        contexts = build_context_blocks(reranked)
 
         if use_compression:
             contexts = await compress_documents(contexts, req.question)
@@ -914,7 +956,7 @@ async def ask_stream(req: AskRequest):
             RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
             return
 
-        context_text = "\n\n".join(contexts)
+        context_text = f"{CITATION_INSTRUCTION}\n\n" + "\n\n".join(contexts)
         language_instruction = response_language_instruction(req.question)
         prompt = f"""
 Ты корпоративный AI ассистент АГМК.
@@ -991,7 +1033,7 @@ async def ask_stream(req: AskRequest):
         history.append({"role": "user", "text": req.question})
         history.append({"role": "assistant", "text": answer})
         await save_history(req.session_id, history)
-        await save_semantic_cache(req.question, answer, scope_keys, cache_history)
+        await save_semantic_cache(req.question, answer, reranked, scope_keys, cache_history)
 
         yield await event({"type": "done", "sources": reranked})
         RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)
