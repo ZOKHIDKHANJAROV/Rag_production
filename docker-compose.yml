@@ -62,6 +62,56 @@ services:
       start_period: 300s
     restart: unless-stopped
 
+  unlimited-ocr-model:
+    image: vllm/vllm-openai:unlimited-ocr
+    profiles: ["ocr"]
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_DISABLE_XET=1
+    command:
+      - baidu/Unlimited-OCR
+      - --trust-remote-code
+      - --logits_processors
+      - vllm.model_executor.models.unlimited_ocr:NGramPerReqLogitsProcessor
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb
+      - "0"
+    gpus: all
+    ipc: host
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+    restart: unless-stopped
+
+  ocr-service:
+    build: ./ocr-service
+    profiles: ["ocr"]
+    env_file:
+      - .env
+    depends_on:
+      unlimited-ocr-model:
+        condition: service_healthy
+    environment:
+      - OCR_MODEL_URL=http://unlimited-ocr-model:8000/v1/chat/completions
+      - OCR_MODEL_NAME=${OCR_MODEL_NAME:-baidu/Unlimited-OCR}
+      - OCR_MAX_PAGES=${OCR_MAX_PAGES:-20}
+      - OCR_RENDER_DPI=${OCR_RENDER_DPI:-150}
+      - OCR_MAX_TOKENS=${OCR_MAX_TOKENS:-32768}
+      - OCR_REQUEST_TIMEOUT=${OCR_REQUEST_TIMEOUT:-1200}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
   embedding-service:
     build: ./embedding-service
     env_file:
@@ -150,6 +200,9 @@ services:
       - INGESTION_WORKERS=2
       - INGESTION_HTTP_MAX_CONNECTIONS=100
       - INGESTION_HTTP_MAX_KEEPALIVE=20
+      - OCR_ENABLED=${OCR_ENABLED:-false}
+      - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://ocr-service:8006/extract}
+      - OCR_MIN_TEXT_CHARS=${OCR_MIN_TEXT_CHARS:-80}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]

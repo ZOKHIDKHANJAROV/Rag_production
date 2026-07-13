@@ -29,6 +29,8 @@ jobs:
             ui-service/requirements.txt
             llm-service/requirements.txt
             rag-service/requirements.txt
+            ingestion-service/requirements.txt
+            ocr-service/requirements.txt
 
       - name: Install dependencies
         run: |
@@ -36,6 +38,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -r rag-service/requirements.txt
           pip install -r ingestion-service/requirements.txt
+          pip install -r ocr-service/requirements.txt
 
       - name: Run tests
         run: pytest -q
