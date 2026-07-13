@@ -37,6 +37,8 @@ RAG_ENABLE_QUERY_EXPANSION = os.getenv("RAG_ENABLE_QUERY_EXPANSION", "false").lo
 RAG_ENABLE_GROUNDING_CHECK = os.getenv("RAG_ENABLE_GROUNDING_CHECK", "false").lower() == "true"
 RAG_SEARCH_CANDIDATES = int(os.getenv("RAG_SEARCH_CANDIDATES", "24"))
 RAG_FINAL_TOP_K = int(os.getenv("RAG_FINAL_TOP_K", "5"))
+RAG_RRF_K = int(os.getenv("RAG_RRF_K", "60"))
+RAG_MAX_CHUNKS_PER_DOCUMENT = int(os.getenv("RAG_MAX_CHUNKS_PER_DOCUMENT", "1"))
 
 CACHE_COLLECTION = "semantic_cache"
 CACHE_THRESHOLD = 0.92
@@ -65,10 +67,16 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-def build_rag_cache_key(question, scope_keys=None):
+def build_rag_cache_key(question, scope_keys=None, history=None):
     raw = question.strip().lower()
     scopes = ",".join(sorted(scope_keys or ["global"]))
-    return f"rag:{RAG_CACHE_VERSION}:" + hashlib.sha256(f"{scopes}:{raw}".encode()).hexdigest()
+    history_payload = json.dumps(
+        history or [],
+        ensure_ascii=False,
+        separators=(",", ":")
+    )
+    cache_input = f"{scopes}:{history_payload}:{raw}"
+    return f"rag:{RAG_CACHE_VERSION}:" + hashlib.sha256(cache_input.encode()).hexdigest()
 
 def is_negative_or_empty_answer(answer):
     normalized = re.sub(r"\s+", " ", (answer or "").strip().lower())
@@ -246,8 +254,8 @@ def metrics():
 # Semantic Cache
 # ---------------------------
 
-async def check_semantic_cache(question, scope_keys):
-    cache_key = build_rag_cache_key(question, scope_keys)
+async def check_semantic_cache(question, scope_keys, history):
+    cache_key = build_rag_cache_key(question, scope_keys, history)
     cached = await redis_client.get(cache_key)
 
     if cached:
@@ -263,13 +271,13 @@ async def check_semantic_cache(question, scope_keys):
     return None
 
 
-async def save_semantic_cache(question, answer, scope_keys):
+async def save_semantic_cache(question, answer, scope_keys, history):
     if is_negative_or_empty_answer(answer):
         logging.info({"event": "rag_cache_negative_skipped"})
         return
 
     await redis_client.setex(
-        build_rag_cache_key(question, scope_keys),
+        build_rag_cache_key(question, scope_keys, history),
         RAG_CACHE_TTL,
         answer
     )
@@ -310,13 +318,76 @@ def keyword_score(query, text):
 # Reranker
 # ---------------------------
 
-def rerank_documents(question, docs):
-    docs.sort(
-        key=lambda x: x.get("hybrid_score", x.get("score", 0)),
-        reverse=True
-    )
+def result_key(result):
+    document_id = result.get("document_id") or result.get("id") or ""
+    return document_id, result.get("text", "")[:200]
 
-    return docs
+
+def fuse_search_results(results):
+    fused = {}
+
+    for result in results:
+        key = result_key(result)
+        rank = max(1, int(result.get("query_rank", 1)))
+        candidate = fused.get(key)
+
+        if candidate is None:
+            candidate = dict(result)
+            candidate["rrf_score"] = 0.0
+            fused[key] = candidate
+        elif result.get("score", 0) > candidate.get("score", 0):
+            candidate.update(result)
+
+        candidate["rrf_score"] += 1.0 / (RAG_RRF_K + rank)
+
+    return list(fused.values())
+
+
+def rank_documents(question, results):
+    ranked = fuse_search_results(results)
+    query_count = len({result.get("query_index", 0) for result in results})
+
+    for result in ranked:
+        result["keyword_score"] = keyword_score(question, result["text"])
+        result["hybrid_score"] = (
+            0.7 * result["score"] + 0.3 * result["keyword_score"]
+        )
+
+    ranked = [
+        result for result in ranked
+        if result["score"] >= SCORE_THRESHOLD
+        or result["hybrid_score"] >= SCORE_THRESHOLD
+    ]
+
+    if query_count > 1:
+        sort_key = lambda result: (
+            result["rrf_score"],
+            result["hybrid_score"]
+        )
+    else:
+        sort_key = lambda result: (
+            result["hybrid_score"],
+            result["rrf_score"]
+        )
+
+    return sorted(ranked, key=sort_key, reverse=True)[:RAG_SEARCH_CANDIDATES]
+
+
+def rerank_documents(question, docs):
+    selected = []
+    chunks_per_document = {}
+
+    for doc in docs:
+        document_id = doc.get("document_id") or doc.get("id") or doc["text"][:200]
+        current_count = chunks_per_document.get(document_id, 0)
+
+        if current_count >= RAG_MAX_CHUNKS_PER_DOCUMENT:
+            continue
+
+        chunks_per_document[document_id] = current_count + 1
+        selected.append(doc)
+
+    return selected
 
 # ---------------------------
 # Context trimming
@@ -326,16 +397,19 @@ def trim_context(contexts):
 
     total = 0
     trimmed = []
+    oversized_fallback = None
 
     for c in contexts:
 
         if total + len(c) > MAX_CONTEXT_CHARS:
-            break
+            if oversized_fallback is None and MAX_CONTEXT_CHARS > 0:
+                oversized_fallback = c[:MAX_CONTEXT_CHARS]
+            continue
 
         trimmed.append(c)
         total += len(c)
 
-    return trimmed
+    return trimmed or ([oversized_fallback] if oversized_fallback else [])
 
 async def parallel_embeddings(answer, contexts):
 
@@ -472,11 +546,14 @@ async def multi_vector_search(queries, top_k, scope_keys):
 
     results = []
 
-    for r in responses:
+    for query_index, response in enumerate(responses):
 
-        r.raise_for_status()
+        response.raise_for_status()
 
-        results.extend(r.json()["results"])
+        for rank, result in enumerate(response.json()["results"], start=1):
+            result["query_index"] = query_index
+            result["query_rank"] = rank
+            results.append(result)
 
     return results
 
@@ -501,7 +578,14 @@ async def ask(req: AskRequest):
         # ---------------------------
 
         scope_keys = sorted(set(req.scope_keys or ["global"]))
-        cached_answer = await check_semantic_cache(req.question, scope_keys)
+        history = await get_history(req.session_id)
+        history = history[-MAX_HISTORY_MESSAGES:]
+        cache_history = list(history)
+        cached_answer = await check_semantic_cache(
+            req.question,
+            scope_keys,
+            cache_history
+        )
 
         if cached_answer:
 
@@ -541,10 +625,6 @@ async def ask(req: AskRequest):
         # Session memory
         # ---------------------------
 
-        history = await get_history(req.session_id)
-
-        history = history[-MAX_HISTORY_MESSAGES:]
-
         history_text = "\n".join(
             [f"{h['role']}: {h['text']}" for h in history]
         )
@@ -562,52 +642,7 @@ async def ask(req: AskRequest):
             )
             search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
 
-        # ---------------------------
-        # Deduplicate
-        # ---------------------------
-
-        seen = set()
-        unique = []
-
-        for r in search_results:
-
-            doc_id = r.get("document_id") or r.get("id") or ""
-            chunk_key = (doc_id, r["text"][:200])
-
-            if chunk_key not in seen:
-
-                seen.add(chunk_key)
-                unique.append(r)
-
-        search_results = unique
-
-        # ---------------------------
-        # Hybrid retrieval
-        # ---------------------------
-
-        for r in search_results:
-
-            r["keyword_score"] = keyword_score(
-                req.question,
-                r["text"]
-            )
-
-            r["hybrid_score"] = (
-                0.7 * r["score"] +
-                0.3 * r["keyword_score"]
-            )
-
-        search_results.sort(
-            key=lambda x: x["hybrid_score"],
-            reverse=True
-        )
-
-        filtered = [
-            r for r in search_results
-            if r["score"] >= SCORE_THRESHOLD or r["hybrid_score"] >= SCORE_THRESHOLD
-        ]
-
-        filtered = filtered[:RAG_SEARCH_CANDIDATES]
+        filtered = rank_documents(req.question, search_results)
 
         if not filtered:
 
@@ -788,7 +823,7 @@ async def ask(req: AskRequest):
     # Save semantic cache
     # ---------------------------
 
-    await save_semantic_cache(req.question, answer, scope_keys)
+    await save_semantic_cache(req.question, answer, scope_keys, cache_history)
 
     return {
         "answer": answer,
@@ -813,7 +848,14 @@ async def ask_stream(req: AskRequest):
         })
 
         scope_keys = sorted(set(req.scope_keys or ["global"]))
-        cached_answer = await check_semantic_cache(req.question, scope_keys)
+        history = await get_history(req.session_id)
+        history = history[-MAX_HISTORY_MESSAGES:]
+        cache_history = list(history)
+        cached_answer = await check_semantic_cache(
+            req.question,
+            scope_keys,
+            cache_history
+        )
 
         if cached_answer:
             yield await event({"type": "delta", "text": cached_answer, "cached": True})
@@ -829,8 +871,6 @@ async def ask_stream(req: AskRequest):
         top_k = max(1, min(int(router.get("top_k", req.top_k)), 10))
         use_compression = bool(router.get("compression", RAG_ENABLE_COMPRESSION))
 
-        history = await get_history(req.session_id)
-        history = history[-MAX_HISTORY_MESSAGES:]
         history_text = "\n".join(
             [f"{h['role']}: {h['text']}" for h in history]
         )
@@ -844,29 +884,7 @@ async def ask_stream(req: AskRequest):
         VECTOR_LATENCY.observe(asyncio.get_running_loop().time() - vector_started_at)
         search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
 
-        seen = set()
-        unique = []
-
-        for r in search_results:
-            doc_id = r.get("document_id") or r.get("id") or ""
-            chunk_key = (doc_id, r["text"][:200])
-
-            if chunk_key not in seen:
-                seen.add(chunk_key)
-                unique.append(r)
-
-        search_results = unique
-
-        for r in search_results:
-            r["keyword_score"] = keyword_score(req.question, r["text"])
-            r["hybrid_score"] = 0.7 * r["score"] + 0.3 * r["keyword_score"]
-
-        search_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
-
-        filtered = [
-            r for r in search_results
-            if r["score"] >= SCORE_THRESHOLD or r["hybrid_score"] >= SCORE_THRESHOLD
-        ][:RAG_SEARCH_CANDIDATES]
+        filtered = rank_documents(req.question, search_results)
 
         if not filtered:
             answer = "В базе знаний нет информации по данному вопросу."
@@ -973,7 +991,7 @@ async def ask_stream(req: AskRequest):
         history.append({"role": "user", "text": req.question})
         history.append({"role": "assistant", "text": answer})
         await save_history(req.session_id, history)
-        await save_semantic_cache(req.question, answer, scope_keys)
+        await save_semantic_cache(req.question, answer, scope_keys, cache_history)
 
         yield await event({"type": "done", "sources": reranked})
         RAG_LATENCY.observe(asyncio.get_running_loop().time() - started_at)

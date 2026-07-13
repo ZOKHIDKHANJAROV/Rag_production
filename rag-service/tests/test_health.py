@@ -96,3 +96,85 @@ def test_rag_health_fails_when_dependency_is_unavailable():
         assert exc.detail == "Service unhealthy"
     else:
         raise AssertionError("Expected health check failure")
+
+
+def test_cache_key_changes_with_conversation_history():
+    rag_main = load_rag_module()
+
+    empty_history_key = rag_main.build_rag_cache_key(
+        "What is the deadline?",
+        ["global"],
+        []
+    )
+    contextual_history_key = rag_main.build_rag_cache_key(
+        "What is the deadline?",
+        ["global"],
+        [{"role": "user", "text": "Tell me about project Alpha."}]
+    )
+
+    assert empty_history_key != contextual_history_key
+
+
+def test_fuse_search_results_rewards_agreement_between_queries():
+    rag_main = load_rag_module()
+    results = [
+        {
+            "document_id": "doc-a",
+            "text": "Alpha deadline is Friday.",
+            "score": 0.8,
+            "query_rank": 1,
+        },
+        {
+            "document_id": "doc-b",
+            "text": "Beta deadline is Monday.",
+            "score": 0.82,
+            "query_rank": 1,
+        },
+        {
+            "document_id": "doc-a",
+            "text": "Alpha deadline is Friday.",
+            "score": 0.78,
+            "query_rank": 2,
+        },
+    ]
+
+    fused = rag_main.fuse_search_results(results)
+    by_document = {item["document_id"]: item for item in fused}
+
+    assert len(fused) == 2
+    assert by_document["doc-a"]["rrf_score"] > by_document["doc-b"]["rrf_score"]
+
+
+def test_rerank_limits_chunks_from_the_same_document():
+    rag_main = load_rag_module()
+    original_limit = rag_main.RAG_MAX_CHUNKS_PER_DOCUMENT
+    rag_main.RAG_MAX_CHUNKS_PER_DOCUMENT = 1
+    docs = [
+        {"document_id": "doc-a", "text": "First Alpha chunk"},
+        {"document_id": "doc-a", "text": "Second Alpha chunk"},
+        {"document_id": "doc-b", "text": "Beta chunk"},
+    ]
+
+    try:
+        selected = rag_main.rerank_documents("question", docs)
+    finally:
+        rag_main.RAG_MAX_CHUNKS_PER_DOCUMENT = original_limit
+
+    assert [item["document_id"] for item in selected] == ["doc-a", "doc-b"]
+
+
+def test_trim_context_skips_an_oversized_chunk():
+    rag_main = load_rag_module()
+    original_limit = rag_main.MAX_CONTEXT_CHARS
+    rag_main.MAX_CONTEXT_CHARS = 10
+
+    try:
+        contexts = rag_main.trim_context([
+            "This chunk is too long",
+            "short",
+            "tiny",
+        ])
+    finally:
+        rag_main.MAX_CONTEXT_CHARS = original_limit
+
+    assert contexts == ["short", "tiny"]
