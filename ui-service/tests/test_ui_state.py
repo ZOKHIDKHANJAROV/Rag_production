@@ -460,3 +460,23 @@ def test_feedback_api_persists_a_session_owned_answer(monkeypatch, tmp_path):
     assert ui_main.db_pool.feedback[0]["sources"] == [{"filename": "policy.pdf"}]
     saved_session = asyncio.run(ui_main.load_session_state(session_id))
     assert saved_session["history"][1]["feedback"] is False
+
+
+def test_feedback_export_builds_evaluation_candidate(monkeypatch, tmp_path):
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+    candidate = ui_main.feedback_to_evaluation_case(
+        {
+            "id": 7,
+            "question": "What is the deadline?",
+            "sources": [
+                {"filename": "policy.pdf", "scope_key": "global"},
+                {"filename": "policy.pdf", "scope_key": "global"},
+                {"document_id": "private-doc", "scope_key": "user:alice"},
+            ],
+        }
+    )
+
+    assert candidate["id"] == "feedback-7"
+    assert candidate["expected_sources"] == ["policy.pdf", "private-doc"]
+    assert candidate["scope_keys"] == ["global", "user:alice"]
+    assert candidate["expected_answer_contains"] == []

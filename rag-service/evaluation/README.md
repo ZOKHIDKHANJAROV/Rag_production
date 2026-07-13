@@ -23,3 +23,9 @@ The report contains:
 - `latency_ms`: p50, p95, and mean end-to-end latency.
 
 Use at least 30 production-like cases, including ambiguous wording, document-specific questions, and questions that should be refused. Do not add private datasets or generated reports to Git.
+
+## Feedback review
+
+Administrators can open the Feedback tab, review negative responses, and mark representative cases for evaluation. The Export selected action downloads `questions.candidates.json` from `/api/admin/feedback/evaluation-candidates`.
+
+Review every exported case before adding it to `questions.local.json`: confirm the source documents and add verified `expected_answer_contains` facts. Candidates may include personal scopes, so keep the dataset local and do not commit it.

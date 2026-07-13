@@ -1024,6 +1024,37 @@ html[data-theme="dark"] .empty-logo {
   color: var(--gold-strong);
 }
 
+.admin-feedback-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.admin-feedback-row {
+  align-items: flex-start;
+}
+
+.admin-feedback-row > div {
+  min-width: 0;
+}
+
+.admin-feedback-row strong,
+.admin-feedback-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-feedback-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .sources-panel {
   max-height: 310px;
   padding: 16px 24px;
