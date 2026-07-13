@@ -16,6 +16,9 @@ VECTOR_SERVICE_URL = os.getenv("VECTOR_SERVICE_URL", "http://embedding-service:8
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 HTTP_MAX_CONNECTIONS = int(os.getenv("INGESTION_HTTP_MAX_CONNECTIONS", "100"))
 HTTP_MAX_KEEPALIVE = int(os.getenv("INGESTION_HTTP_MAX_KEEPALIVE", "20"))
+OCR_ENABLED = os.getenv("OCR_ENABLED", "false").lower() == "true"
+OCR_SERVICE_URL = os.getenv("OCR_SERVICE_URL", "http://ocr-service:8006/extract")
+OCR_MIN_TEXT_CHARS = int(os.getenv("OCR_MIN_TEXT_CHARS", "80"))
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 SERVICE_AUTH_HEADER = "X-Service-Token"
 
@@ -89,6 +92,31 @@ def extract_text_from_docx(file_bytes: bytes):
     doc_stream = BytesIO(file_bytes)
     doc = Document(doc_stream)
     return "\n".join([para.text for para in doc.paragraphs if para.text])
+
+
+async def extract_text_with_ocr(file_bytes: bytes, filename: str):
+    if http_client is None:
+        raise HTTPException(status_code=503, detail="Ingestion HTTP client is not initialized")
+
+    response = await http_client.post(
+        OCR_SERVICE_URL,
+        files={"file": (filename, file_bytes, "application/octet-stream")},
+        data={"filename": filename},
+        headers=service_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json().get("text", "")
+
+
+def should_use_ocr(filename: str, text: str) -> bool:
+    supported_extensions = (".pdf", ".png", ".jpg", ".jpeg", ".webp")
+    normalized_text_length = len(re.sub(r"\s+", "", text))
+    return (
+        OCR_ENABLED
+        and filename.lower().endswith(supported_extensions)
+        and normalized_text_length < OCR_MIN_TEXT_CHARS
+    )
 
 
 # 🔥 Chunking
@@ -227,6 +255,8 @@ async def upload_file(
     filename = file.filename.lower()
 
     # 3️⃣ Извлекаем текст
+    text = ""
+    native_extraction_error = None
     try:
         if filename.endswith(".pdf"):
             text = extract_text_from_pdf(file_bytes)
@@ -237,15 +267,35 @@ async def upload_file(
         elif filename.endswith((".txt", ".md")):
             text = file_bytes.decode("utf-8", errors="ignore")
 
-        else:
+        elif not filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
             raise HTTPException(status_code=415, detail="Unsupported file type")
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Text extraction failed: {str(e)}")
+        native_extraction_error = e
+
+    extraction_engine = "native"
+    if should_use_ocr(filename, text):
+        try:
+            ocr_text = await extract_text_with_ocr(file_bytes, file.filename)
+        except (HTTPException, httpx.HTTPError) as error:
+            if not text.strip():
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"OCR extraction unavailable: {str(error)}",
+                ) from error
+        else:
+            if ocr_text.strip():
+                text = ocr_text
+                extraction_engine = "Unlimited-OCR"
 
     if not text.strip():
+        if native_extraction_error:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Text extraction failed: {str(native_extraction_error)}",
+            )
         raise HTTPException(status_code=422, detail="No text extracted from file")
 
     # 4️⃣ Chunking
@@ -305,4 +355,5 @@ async def upload_file(
         "document_date": detected_date,
         "document_type": document_type,
         "uploaded_at": uploaded_at,
+        "extraction_engine": extraction_engine,
     }

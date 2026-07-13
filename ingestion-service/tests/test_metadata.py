@@ -30,3 +30,14 @@ def test_document_metadata_extracts_title_date_and_sections():
     assert ingestion.normalize_document_date(text) == "2025-06-18"
     assert chunks == ["Updated 2025-06-18", "Wear a helmet."]
     assert sections == ["Safety policy", "Scope"]
+
+
+def test_ocr_is_used_only_for_short_scanned_content(monkeypatch):
+    ingestion = load_ingestion_module()
+    monkeypatch.setattr(ingestion, "OCR_ENABLED", True)
+    monkeypatch.setattr(ingestion, "OCR_MIN_TEXT_CHARS", 80)
+
+    assert ingestion.should_use_ocr("scan.pdf", "too short")
+    assert ingestion.should_use_ocr("receipt.png", "")
+    assert not ingestion.should_use_ocr("report.docx", "")
+    assert not ingestion.should_use_ocr("report.pdf", "x" * 80)
