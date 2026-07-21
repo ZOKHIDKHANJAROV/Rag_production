@@ -63,8 +63,10 @@ docker compose up --build
 
 - Обычный текст из PDF и DOCX извлекается нативно.
 - Документ индексируется вместе с метаданными: title, section, date, file type, scope и owner.
-- Поиск использует vector retrieval, keyword boost, reranking и фильтрацию по scope.
+- Поиск использует hybrid retrieval (dense + sparse), RRF fusion, metadata boost, reranking и фильтрацию по scope.
 - Ответы показывают источники, а feedback сохраняет вопрос, ответ и выбранные источники.
+
+Подробная схема и migration для sparse-индекса: [docs/advanced-rag.md](docs/advanced-rag.md).
 
 ## 1C ZUP Search
 

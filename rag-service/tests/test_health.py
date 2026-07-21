@@ -100,6 +100,37 @@ class FailingHttpClient:
         return None
 
 
+class HybridSearchHttpClient:
+    async def post(self, url, json=None, headers=None):
+        assert url.endswith("/search")
+        return HybridSearchResponse()
+
+
+class HybridSearchResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {
+            "results": [
+                {
+                    "document_id": "doc-dense",
+                    "text": "Semantic result",
+                    "score": 0.8,
+                    "retrieval_channel": "dense",
+                    "retrieval_rank": 1,
+                },
+                {
+                    "document_id": "doc-sparse",
+                    "text": "Exact identifier result",
+                    "score": 0.5,
+                    "retrieval_channel": "sparse",
+                    "retrieval_rank": 1,
+                },
+            ]
+        }
+
+
 def test_rag_health_reports_dependency_status():
     rag_main = load_rag_module()
     rag_main.redis_client = StubRedis()
@@ -249,7 +280,114 @@ def test_metadata_boost_and_context_labels_use_document_fields():
     contexts = rag_main.build_context_blocks([result])
 
     assert score > 0
-    assert contexts == ["[safety-policy.pdf]\nEmployees must wear a helmet."]
+    assert contexts == [
+        "[safety-policy.pdf]\nHelmet requirements: Employees must wear a helmet."
+    ]
+
+
+def test_hybrid_fusion_rewards_a_chunk_found_by_dense_and_sparse_search():
+    rag_main = load_rag_module()
+    results = [
+        {
+            "document_id": "doc-a",
+            "text": "Alpha policy requires a helmet.",
+            "score": 0.84,
+            "query_rank": 1,
+            "retrieval_channel": "dense",
+        },
+        {
+            "document_id": "doc-b",
+            "text": "Beta policy requires gloves.",
+            "score": 0.93,
+            "query_rank": 1,
+            "retrieval_channel": "sparse",
+        },
+        {
+            "document_id": "doc-a",
+            "text": "Alpha policy requires a helmet.",
+            "score": 0.42,
+            "query_rank": 2,
+            "retrieval_channel": "sparse",
+        },
+    ]
+
+    ranked = rag_main.rank_documents("Alpha helmet policy", results)
+
+    assert ranked[0]["document_id"] == "doc-a"
+    assert ranked[0]["retrieval_channels"] == ["dense", "sparse"]
+
+
+def test_multi_vector_search_keeps_both_retrieval_channels():
+    rag_main = load_rag_module()
+    original_client = rag_main.client
+    rag_main.client = HybridSearchHttpClient()
+
+    try:
+        results = asyncio.run(rag_main.multi_vector_search(["INV-42"], 5, ["global"]))
+    finally:
+        rag_main.client = original_client
+
+    assert [(item["retrieval_channel"], item["query_rank"]) for item in results] == [
+        ("dense", 1),
+        ("sparse", 1),
+    ]
+
+
+def test_context_fusion_uses_one_citation_for_multiple_chunks_of_a_document():
+    rag_main = load_rag_module()
+
+    contexts = rag_main.build_context_blocks([
+        {
+            "document_id": "policy",
+            "filename": "policy.pdf",
+            "section": "Deadlines",
+            "text": "The deadline is Friday.",
+        },
+        {
+            "document_id": "policy",
+            "filename": "policy.pdf",
+            "section": "Escalation",
+            "text": "Escalate changes to the manager.",
+        },
+    ])
+
+    assert contexts == [
+        "[policy.pdf]\nDeadlines: The deadline is Friday.\n"
+        "Escalation: Escalate changes to the manager."
+    ]
+
+
+def test_lightweight_reranker_keeps_diverse_documents_before_duplicate_chunks():
+    rag_main = load_rag_module()
+    original_limit = rag_main.RAG_MAX_CHUNKS_PER_DOCUMENT
+    rag_main.RAG_MAX_CHUNKS_PER_DOCUMENT = 1
+    docs = [
+        {
+            "document_id": "doc-a",
+            "text": "Alpha deadline is Friday and must be approved.",
+            "hybrid_score": 0.9,
+            "rrf_score": 0.03,
+        },
+        {
+            "document_id": "doc-a",
+            "text": "Alpha deadline is Friday and must be approved by legal.",
+            "hybrid_score": 0.88,
+            "rrf_score": 0.03,
+        },
+        {
+            "document_id": "doc-b",
+            "text": "Beta escalation is sent to the project manager.",
+            "hybrid_score": 0.7,
+            "rrf_score": 0.02,
+        },
+    ]
+
+    try:
+        selected = rag_main.rerank_documents("Alpha deadline approval", docs)
+    finally:
+        rag_main.RAG_MAX_CHUNKS_PER_DOCUMENT = original_limit
+
+    assert {item["document_id"] for item in selected} == {"doc-a", "doc-b"}
 
 
 def test_evaluation_reports_source_and_answer_match():

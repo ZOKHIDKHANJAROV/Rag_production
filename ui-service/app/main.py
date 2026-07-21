@@ -4,7 +4,6 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
 import httpx
 import asyncpg
 import logging
@@ -23,6 +22,7 @@ import redis.asyncio as redis
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+
 
 # =========================
 # LOGGING
@@ -169,27 +169,6 @@ ROLE_PERMISSIONS = {
 }
 
 
-class AdminUserUpdate(BaseModel):
-    password: str | None = None
-    role: str | None = None
-
-
-class AdminUserCreate(BaseModel):
-    username: str
-    password: str
-    role: str = ROLE_USER
-
-
-class FeedbackRequest(BaseModel):
-    session_id: str
-    answer_id: str
-    helpful: bool
-
-
-class FeedbackSelectionRequest(BaseModel):
-    selected_for_evaluation: bool
-
-
 def normalize_role(role: str) -> str:
     normalized = (role or ROLE_USER).strip().lower()
     if normalized not in KNOWN_ROLES:
@@ -242,6 +221,36 @@ SERVICES = {
     "tts": TTS_SERVICE_URL,
     "zup": ZUP_SERVICE_URL,
 }
+
+
+if __package__:
+    from app.schemas import (
+        AdminUserCreate,
+        AdminUserUpdate,
+        FeedbackRequest,
+        FeedbackSelectionRequest,
+    )
+else:
+    # Direct-module loading is kept for legacy test and integration tooling.
+    class AdminUserUpdate(BaseModel):
+        password: str | None = None
+        role: str | None = None
+
+
+    class AdminUserCreate(BaseModel):
+        username: str
+        password: str
+        role: str = ROLE_USER
+
+
+    class FeedbackRequest(BaseModel):
+        session_id: str
+        answer_id: str
+        helpful: bool
+
+
+    class FeedbackSelectionRequest(BaseModel):
+        selected_for_evaluation: bool
 
 http_client: httpx.AsyncClient | None = None
 redis_client: redis.Redis | None = None
