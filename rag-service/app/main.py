@@ -39,6 +39,8 @@ RAG_SEARCH_CANDIDATES = int(os.getenv("RAG_SEARCH_CANDIDATES", "24"))
 RAG_FINAL_TOP_K = int(os.getenv("RAG_FINAL_TOP_K", "5"))
 RAG_RRF_K = int(os.getenv("RAG_RRF_K", "60"))
 RAG_MAX_CHUNKS_PER_DOCUMENT = int(os.getenv("RAG_MAX_CHUNKS_PER_DOCUMENT", "1"))
+RAG_SPARSE_SCORE_THRESHOLD = float(os.getenv("RAG_SPARSE_SCORE_THRESHOLD", "0.12"))
+RAG_MMR_LAMBDA = float(os.getenv("RAG_MMR_LAMBDA", "0.82"))
 
 CACHE_COLLECTION = "semantic_cache"
 CACHE_THRESHOLD = 0.92
@@ -312,18 +314,24 @@ def cosine_similarity(a, b):
 # Keyword scoring
 # ---------------------------
 
+def lexical_terms(text):
+    return re.findall(r"[\w\u0400-\u04ff]{3,}", (text or "").lower())
+
+
+def jaccard_similarity(left, right):
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
 def keyword_score(query, text):
 
-    words = {
-        word
-        for word in re.findall(r"[\w\u0400-\u04ff]{3,}", query.lower())
-        if len(word) >= 3
-    }
+    words = set(lexical_terms(query))
 
     if not words:
         return 0
 
-    text_words = set(re.findall(r"[\w\u0400-\u04ff]{3,}", text.lower()))
+    text_words = set(lexical_terms(text))
     if not text_words:
         return 0
 
@@ -348,9 +356,20 @@ def source_label(result):
 
 
 def build_context_blocks(results):
+    fused = {}
+    for result in results:
+        key = result.get("document_id") or result_key(result)
+        group = fused.setdefault(key, {"label": source_label(result), "parts": []})
+        text = (result.get("text") or "").strip()
+        if not text or text in group["parts"]:
+            continue
+        section = (result.get("section") or "").strip()
+        group["parts"].append(f"{section}: {text}" if section else text)
+
     return [
-        f"[{source_label(result)}]\n{result['text']}"
-        for result in results
+        f"[{group['label']}]\n" + "\n".join(group["parts"])
+        for group in fused.values()
+        if group["parts"]
     ]
 
 # ---------------------------
@@ -373,18 +392,28 @@ def fuse_search_results(results):
         if candidate is None:
             candidate = dict(result)
             candidate["rrf_score"] = 0.0
+            candidate["retrieval_channels"] = []
+            candidate["dense_score"] = None
+            candidate["sparse_score"] = None
             fused[key] = candidate
         elif result.get("score", 0) > candidate.get("score", 0):
             candidate.update(result)
 
         candidate["rrf_score"] += 1.0 / (RAG_RRF_K + rank)
+        channel = result.get("retrieval_channel", "dense")
+        if channel not in candidate["retrieval_channels"]:
+            candidate["retrieval_channels"].append(channel)
+        score_key = f"{channel}_score"
+        candidate[score_key] = max(
+            result.get("score", 0),
+            candidate.get(score_key) or 0,
+        )
 
     return list(fused.values())
 
 
 def rank_documents(question, results):
     ranked = fuse_search_results(results)
-    query_count = len({result.get("query_index", 0) for result in results})
 
     for result in ranked:
         result["keyword_score"] = keyword_score(question, result["text"])
@@ -397,29 +426,50 @@ def rank_documents(question, results):
 
     ranked = [
         result for result in ranked
-        if result["score"] >= SCORE_THRESHOLD
+        if (result.get("dense_score") or 0) >= SCORE_THRESHOLD
+        or (result.get("sparse_score") or 0) >= RAG_SPARSE_SCORE_THRESHOLD
         or result["hybrid_score"] >= SCORE_THRESHOLD
     ]
 
-    if query_count > 1:
-        sort_key = lambda result: (
-            result["rrf_score"],
-            result["hybrid_score"]
-        )
-    else:
-        sort_key = lambda result: (
-            result["hybrid_score"],
-            result["rrf_score"]
-        )
-
-    return sorted(ranked, key=sort_key, reverse=True)[:RAG_SEARCH_CANDIDATES]
+    return sorted(
+        ranked,
+        key=lambda result: (result["rrf_score"], result["hybrid_score"]),
+        reverse=True,
+    )[:RAG_SEARCH_CANDIDATES]
 
 
 def rerank_documents(question, docs):
     selected = []
     chunks_per_document = {}
+    selected_terms = []
 
     for doc in docs:
+        coverage = keyword_score(question, doc.get("text", ""))
+        agreement = min(1.0, doc.get("rrf_score", 0) * RAG_RRF_K / 2)
+        doc["rerank_score"] = (
+            0.70 * doc.get("hybrid_score", 0)
+            + 0.20 * coverage
+            + 0.10 * agreement
+        )
+
+    candidates = sorted(docs, key=lambda doc: doc["rerank_score"], reverse=True)
+
+    while candidates:
+        best_index = 0
+        best_score = None
+
+        for index, doc in enumerate(candidates):
+            terms = set(lexical_terms(doc.get("text", "")))
+            max_overlap = max(
+                (jaccard_similarity(terms, selected_term_set) for selected_term_set in selected_terms),
+                default=0.0,
+            )
+            mmr_score = RAG_MMR_LAMBDA * doc["rerank_score"] - (1 - RAG_MMR_LAMBDA) * max_overlap
+            if best_score is None or mmr_score > best_score:
+                best_index = index
+                best_score = mmr_score
+
+        doc = candidates.pop(best_index)
         document_id = doc.get("document_id") or doc.get("id") or doc["text"][:200]
         current_count = chunks_per_document.get(document_id, 0)
 
@@ -428,6 +478,7 @@ def rerank_documents(question, docs):
 
         chunks_per_document[document_id] = current_count + 1
         selected.append(doc)
+        selected_terms.append(set(lexical_terms(doc.get("text", ""))))
 
     return selected
 
@@ -594,7 +645,7 @@ async def multi_vector_search(queries, top_k, scope_keys):
 
         for rank, result in enumerate(response.json()["results"], start=1):
             result["query_index"] = query_index
-            result["query_rank"] = rank
+            result["query_rank"] = max(1, int(result.get("retrieval_rank", rank)))
             results.append(result)
 
     return results
@@ -682,7 +733,6 @@ async def ask(req: AskRequest):
                 max(top_k, RAG_SEARCH_CANDIDATES),
                 scope_keys
             )
-            search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
 
         filtered = rank_documents(req.question, search_results)
 
@@ -924,7 +974,6 @@ async def ask_stream(req: AskRequest):
             scope_keys
         )
         VECTOR_LATENCY.observe(asyncio.get_running_loop().time() - vector_started_at)
-        search_results = search_results[:RAG_SEARCH_CANDIDATES * len(queries)]
 
         filtered = rank_documents(req.question, search_results)
 

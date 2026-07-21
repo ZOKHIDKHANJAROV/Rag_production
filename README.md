@@ -63,8 +63,16 @@ docker compose up --build
 
 - Обычный текст из PDF и DOCX извлекается нативно.
 - Документ индексируется вместе с метаданными: title, section, date, file type, scope и owner.
-- Поиск использует vector retrieval, keyword boost, reranking и фильтрацию по scope.
+- Поиск использует hybrid retrieval (dense + sparse), RRF fusion, metadata boost, reranking и фильтрацию по scope.
 - Ответы показывают источники, а feedback сохраняет вопрос, ответ и выбранные источники.
+
+Подробная схема и migration для sparse-индекса: [docs/advanced-rag.md](docs/advanced-rag.md).
+
+## 1C ZUP Search
+
+The `superuser` role is assigned only by an administrator. It gives access to protected employee search through the configured 1C ZUP API but does not grant user administration, document management, or system settings access. Employee data is not indexed in RAG and is not cached by the application.
+
+Set `ZUP_API_BASE_URL`, `ZUP_EMPLOYEES_PATH`, `ZUP_SEARCH_PARAM`, and the 1C authentication values in `.env`. The supplied workbook documents fields but not the live endpoint, so these values must match the published 1C HTTP/OData API. Details: [docs/zup-api.md](docs/zup-api.md).
 
 ## OCR для сканов
 

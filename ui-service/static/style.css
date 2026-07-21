@@ -1308,6 +1308,65 @@ html[data-theme="dark"] .input-section {
   color: var(--gold-strong);
 }
 
+.zup-section {
+  min-width: 0;
+}
+
+.zup-search-form {
+  display: flex;
+  gap: 6px;
+}
+
+.zup-search-form input {
+  min-width: 0;
+  flex: 1;
+  height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.zup-search-form button {
+  width: 58px;
+  border-radius: 6px;
+  background: var(--gold);
+  color: #211407;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.zup-search-results {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.zup-result,
+.zup-search-status {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.zup-result strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.zup-fired {
+  color: var(--error);
+  font-weight: 800;
+}
+
 .voice-settings-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -34,6 +34,17 @@
                 <div id="documents-list" class="documents-list"></div>
             </div>
 
+            {% if can_search_zup %}
+            <section class="zup-section panel-section">
+                <h3>1C ZUP</h3>
+                <form class="zup-search-form" onsubmit="searchZupEmployees(event)">
+                    <input id="zup-search-input" type="search" minlength="2" placeholder="Name, personnel number, or PINFL" autocomplete="off">
+                    <button type="submit">Search</button>
+                </form>
+                <div id="zup-search-results" class="zup-search-results"></div>
+            </section>
+            {% endif %}
+
             {% if can_view_services %}
             <div class="status-section panel-section">
                 <h3>Сервисы</h3>
@@ -96,6 +107,7 @@
                         <input id="admin-new-username" type="text" placeholder="Логин" autocomplete="off">
                         <input id="admin-new-password" type="password" placeholder="Пароль">
                         <select id="admin-new-role">
+                            <option value="superuser">Суперпользователь</option>
                             <option value="user">Обычный пользователь</option>
                             <option value="admin">Админ</option>
                         </select>
@@ -256,6 +268,7 @@
         const LANGUAGE = 'ru';
         const CAN_VIEW_SERVICES = {{ can_view_services | tojson }};
         const CAN_MANAGE_ADMIN = {{ can_manage_admin | tojson }};
+        const CAN_SEARCH_ZUP = {{ can_search_zup | tojson }};
         const CURRENT_USER = {{ user.username | tojson }};
 
         let currentSessionId = null;
@@ -307,7 +320,6 @@
                 loadAdminUsers();
                 loadAdminDatabases();
                 loadAdminFeedback();
-                loadAdminVoiceSettings();
                 loadAdminVoiceSettings();
             }
             setInterval(() => loadSessions(), 30000);
@@ -808,6 +820,36 @@
             `).join('');
         }
 
+        async function searchZupEmployees(event) {
+            event.preventDefault();
+            if (!CAN_SEARCH_ZUP) return;
+            const input = document.getElementById('zup-search-input');
+            const query = input.value.trim();
+            const container = document.getElementById('zup-search-results');
+            if (query.length < 2) return;
+
+            container.innerHTML = '<div class="zup-search-status">Searching...</div>';
+            const response = await apiFetch(`${API_BASE}/api/zup/employees?query=${encodeURIComponent(query)}`);
+            if (!response.ok) {
+                container.innerHTML = '<div class="zup-search-status">Search is unavailable</div>';
+                return;
+            }
+            const employees = (await response.json()).employees || [];
+            if (!employees.length) {
+                container.innerHTML = '<div class="zup-search-status">No employees found</div>';
+                return;
+            }
+            container.innerHTML = employees.map((employee) => `
+                <article class="zup-result">
+                    <strong>${escapeHtml(employee.name || employee.id_pers || employee.pinfl || 'Employee')}</strong>
+                    <span>${escapeHtml(employee.prof || employee.prof_code || 'Position not specified')}</span>
+                    <span>${escapeHtml(employee.dep_code || employee.ent_code || 'Department not specified')}</span>
+                    ${employee.tab_num ? `<span>Personnel No. ${escapeHtml(employee.tab_num)}</span>` : ''}
+                    ${employee.fired ? '<span class="zup-fired">Dismissed</span>' : ''}
+                </article>
+            `).join('');
+        }
+
         async function loadAdminVoiceSettings() {
             if (!CAN_MANAGE_ADMIN) return;
             const response = await apiFetch(`${API_BASE}/api/admin/voice-settings`);
@@ -1077,6 +1119,7 @@
                     </div>
                     <div class="admin-row-actions">
                         <select onchange="updateAdminUser('${escapeHtml(user.username)}', { role: this.value })">
+                            <option value="superuser" ${user.role === 'superuser' ? 'selected' : ''}>Суперпользователь</option>
                             <option value="user" ${user.role === 'user' ? 'selected' : ''}>Пользователь</option>
                             <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Админ</option>
                         </select>

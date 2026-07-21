@@ -351,6 +351,15 @@ def test_voice_tts_segments_wait_for_sentence_end(monkeypatch, tmp_path):
     assert remainder == "Incomplete"
 
 
+def test_superuser_has_access_only_to_protected_zup_search(monkeypatch, tmp_path):
+    ui_main = prepare_ui_module(monkeypatch, tmp_path)
+    superuser = {"role": ui_main.ROLE_SUPERUSER}
+
+    assert ui_main.has_permission(superuser, "search_zup_data")
+    assert not ui_main.has_permission(superuser, "manage_users")
+    assert ui_main.normalize_role("superuser") == ui_main.ROLE_SUPERUSER
+
+
 def test_revoked_auth_session_blocks_access(monkeypatch, tmp_path):
     monkeypatch.delenv("BOOTSTRAP_ADMIN_USERNAME", raising=False)
     monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)

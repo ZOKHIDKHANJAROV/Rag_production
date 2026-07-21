@@ -272,6 +272,26 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  zup-service:
+    build: ./zup-service
+    env_file:
+      - .env
+    environment:
+      - ZUP_API_BASE_URL=${ZUP_API_BASE_URL:-}
+      - ZUP_EMPLOYEES_PATH=${ZUP_EMPLOYEES_PATH:-/employees}
+      - ZUP_SEARCH_PARAM=${ZUP_SEARCH_PARAM:-q}
+      - ZUP_API_TOKEN=${ZUP_API_TOKEN:-}
+      - ZUP_AUTH_HEADER=${ZUP_AUTH_HEADER:-Authorization}
+      - ZUP_REQUEST_TIMEOUT=${ZUP_REQUEST_TIMEOUT:-30}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   ui-service:
     build: ./ui-service
     env_file:
@@ -287,11 +307,14 @@ services:
       - UI_HTTP_MAX_KEEPALIVE=50
       - ASR_SERVICE_URL=${ASR_SERVICE_URL:-http://asr-service:8007}
       - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://tts-service:8008}
+      - ZUP_SERVICE_URL=${ZUP_SERVICE_URL:-http://zup-service:8009}
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env}
     depends_on:
       rag-service:
         condition: service_healthy
       ingestion-service:
+        condition: service_healthy
+      zup-service:
         condition: service_healthy
       postgres:
         condition: service_healthy
