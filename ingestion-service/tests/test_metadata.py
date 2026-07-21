@@ -1,22 +1,15 @@
-import importlib.util
+import importlib
 import sys
-import uuid
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 INGESTION_ROOT = ROOT / "ingestion-service"
-INGESTION_MAIN_PATH = INGESTION_ROOT / "app" / "main.py"
-
-
 def load_ingestion_module():
-    module_name = f"ingestion_main_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, INGESTION_MAIN_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    service_path = str(INGESTION_ROOT)
+    if service_path not in sys.path:
+        sys.path.insert(0, service_path)
+    return importlib.import_module("app.main")
 
 
 def test_document_metadata_extracts_title_date_and_sections():
